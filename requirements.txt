@@ -1,0 +1,8 @@
+requests
+colorama
+beautifulsoup4
+pypdf
+python-docx
+pymongo
+dnspython
+python-dotenv
