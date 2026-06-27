@@ -270,12 +270,12 @@ def init_mongodb():
     mongo_uri = os.environ.get("MONGO_URI") or keys.get("MONGO_URI", "").strip()
     if mongo_uri:
         try:
+            import ssl
             mongo_client = MongoClient(
                 mongo_uri,
-                serverSelectionTimeoutMS=15000,
-                connectTimeoutMS=15000,
+                serverSelectionTimeoutMS=20000,
+                connectTimeoutMS=20000,
                 socketTimeoutMS=30000,
-                tls=True,
                 tlsAllowInvalidCertificates=True,
                 retryWrites=True
             )
@@ -1988,36 +1988,31 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
 
 def start():
     keys = load_keys()
-    
+
     # Initialize MongoDB connection (if MONGO_URI is set)
     init_mongodb()
-    
+
     cyberneurova_keys, groq_keys, gemini_keys = get_api_keys()
 
     if not cyberneurova_keys:
-        cyberneurova = input("Enter CyberNeurova API key 1: ")
-        save_key("CYBERNEUROVA_1", cyberneurova)
+        print(Fore.RED + "ERROR: No CYBERNEUROVA API key found. Set CYBERNEUROVA_1 in your environment variables or .env file.")
+        sys.exit(1)
     if not groq_keys:
-        groq_key = input("Enter Groq API key 1: ")
-        save_key("GROQ_1", groq_key)
+        print(Fore.RED + "ERROR: No GROQ API key found. Set GROQ_1 in your environment variables or .env file.")
+        sys.exit(1)
     if not gemini_keys:
-        gemini_key = input("Enter Gemini API key 1: ")
-        save_key("GEMINI_1", gemini_key)
+        print(Fore.RED + "ERROR: No GEMINI API key found. Set GEMINI_1 in your environment variables or .env file.")
+        sys.exit(1)
 
-    # Re-read keys after potential input prompts
-    cyberneurova_keys, groq_keys, gemini_keys = get_api_keys()
+    token = keys.get("BOT_TOKEN", "").strip()
+    if not token:
+        print(Fore.RED + "ERROR: BOT_TOKEN is not set. Add it to your environment variables or .env file.")
+        sys.exit(1)
 
-    if "BOT_TOKEN" not in keys:
-        token = input("Enter Telegram Bot Token: ")
-        save_key("BOT_TOKEN", token)
-    else:
-        token = keys["BOT_TOKEN"]
-
-    if "CHAT_ID" not in keys:
-        chat_id = input("Enter Telegram Admin ID: ")
-        save_key("CHAT_ID", chat_id)
-    else:
-        chat_id = keys["CHAT_ID"]
+    chat_id = keys.get("CHAT_ID", "").strip()
+    if not chat_id:
+        print(Fore.RED + "ERROR: CHAT_ID is not set. Add it to your environment variables or .env file.")
+        sys.exit(1)
 
     clear()
     banner()
