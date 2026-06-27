@@ -6,3 +6,4 @@ python-docx
 pymongo
 dnspython
 python-dotenv
+certifi

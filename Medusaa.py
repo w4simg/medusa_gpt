@@ -7,6 +7,7 @@ import sys
 import io
 import html
 import signal
+import certifi
 from datetime import datetime
 from colorama import Fore, init
 from bs4 import BeautifulSoup
@@ -270,14 +271,12 @@ def init_mongodb():
     mongo_uri = os.environ.get("MONGO_URI") or keys.get("MONGO_URI", "").strip()
     if mongo_uri:
         try:
-            import ssl
             mongo_client = MongoClient(
                 mongo_uri,
                 serverSelectionTimeoutMS=20000,
                 connectTimeoutMS=20000,
                 socketTimeoutMS=30000,
-                tlsAllowInvalidCertificates=True,
-                retryWrites=True
+                tlsCAFile=certifi.where()
             )
             mongo_client.admin.command('ping')
             # Extract database name if present, else default to "medusa_bot"
