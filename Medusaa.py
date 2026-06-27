@@ -270,7 +270,15 @@ def init_mongodb():
     mongo_uri = os.environ.get("MONGO_URI") or keys.get("MONGO_URI", "").strip()
     if mongo_uri:
         try:
-            mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+            mongo_client = MongoClient(
+                mongo_uri,
+                serverSelectionTimeoutMS=15000,
+                connectTimeoutMS=15000,
+                socketTimeoutMS=30000,
+                tls=True,
+                tlsAllowInvalidCertificates=True,
+                retryWrites=True
+            )
             mongo_client.admin.command('ping')
             # Extract database name if present, else default to "medusa_bot"
             parsed = pymongo.uri_parser.parse_uri(mongo_uri)
@@ -283,7 +291,7 @@ def init_mongodb():
             mongo_client = None
             mongo_db = None
     else:
-        print(Fore.YELLOW + "ℹ️ No MONGO_URI found in environment or key.txt. Using local user_data.json.")
+        print(Fore.YELLOW + "ℹ️ No MONGO_URI found in environment or .env. Using local user_data.json.")
     return False
 
 # =================================
