@@ -1228,6 +1228,14 @@ def render_ludo_board(game):
 def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
     print("🐍 Telegram mode started (Stable Long Polling with Dual Engines & Search)...")
 
+    bot_username = ""
+    try:
+        me_resp = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10).json()
+        bot_username = me_resp.get("result", {}).get("username", "")
+        print(f"Bot Username: @{bot_username}")
+    except Exception as e:
+        print(f"Error fetching bot username: {e}")
+
     user_histories = {}
     search_modes = {}
     last_update = 0
@@ -1568,6 +1576,19 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             if game["status"] != "lobby":
                                 requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Game is already in progress!"})
                                 continue
+                            
+                            db_data = load_user_data()
+                            if sender_str not in db_data:
+                                requests.post(
+                                    f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                    data={
+                                        "callback_query_id": callback_query["id"],
+                                        "text": "⚠️ You must first start/message the bot in private chat to register before you can join!",
+                                        "show_alert": True
+                                    }
+                                )
+                                continue
+
                             if sender_str in game["players"]:
                                 requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "You already joined!"})
                                 continue
@@ -1735,6 +1756,30 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                     username = message["from"].get("username", "")
                     sender_str = str(sender_id)
 
+                    # -------- WELCOME & LEFT GREETINGS --------
+                    if "new_chat_members" in message:
+                        for member in message["new_chat_members"]:
+                            if bot_username and member.get("username", "").lower() == bot_username.lower():
+                                send_message(token, chat_id, "🐍 *Medusa has entered the chat.* Type `/help` for commands!")
+                                continue
+                            m_name = member.get("first_name", "User")
+                            m_username = f" (@{member['username']})" if member.get("username") else ""
+                            welcome_msg = (
+                                f"👋 *Welcome to the group, {m_name}{m_username}!* 🐍✨\n"
+                                f"I am Medusa. Type `/help` to see my commands, play games, and earn points!"
+                            )
+                            send_message(token, chat_id, welcome_msg)
+                        continue
+
+                    if "left_chat_member" in message:
+                        member = message["left_chat_member"]
+                        m_name = member.get("first_name", "User")
+                        left_msg = f"👋 *Goodbye, {m_name}.* The serpent's watch over you ends. 🐍"
+                        send_message(token, chat_id, left_msg)
+                        continue
+
+                    session_key = str(chat_id) if chat_id > 0 else f"{chat_id}_{sender_id}"
+
                     # Register user in stats immediately
                     user_data = load_user_data()
                     current_date_str = datetime.now().strftime("%Y-%m-%d")
@@ -1815,6 +1860,19 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
 
                     # -------- DOCUMENT MESSAGE --------
                     if "document" in message:
+                        # If in group, check if bot is mentioned in caption or replied to
+                        if chat_id < 0:
+                            is_mentioned = False
+                            caption = message.get("caption", "").strip()
+                            if bot_username and f"@{bot_username.lower()}" in caption.lower():
+                                is_mentioned = True
+                            elif "reply_to_message" in message:
+                                reply_to = message["reply_to_message"]
+                                if reply_to.get("from", {}).get("username", "").lower() == bot_username.lower():
+                                    is_mentioned = True
+                            if not is_mentioned:
+                                continue
+
                         doc = message["document"]
                         file_id = doc["file_id"]
                         file_name = doc.get("file_name", "document")
@@ -1857,7 +1915,8 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                                         doc_text = file_bytes.decode("utf-8")
                                     except Exception:
                                         doc_text = file_bytes.decode("latin-1", errors="ignore")
-                                elif ext == "pdf":
+                                eloquence_text = ""
+                                if ext == "pdf":
                                     doc_text = extract_text_from_pdf(file_bytes)
                                 elif ext == "docx":
                                     doc_text = extract_text_from_docx(file_bytes)
@@ -1891,16 +1950,16 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                                         reply = re.sub(r"\[PREF:\s*(.*?)\]", "", reply).strip()
                                     
                                     # Initialize history
-                                    if chat_id not in user_histories:
+                                    if session_key not in user_histories:
                                         saved_hist = user_record.get("history", [])
-                                        user_histories[chat_id] = saved_hist if saved_hist else [
+                                        user_histories[session_key] = saved_hist if saved_hist else [
                                             {"role": "system", "content": build_system_prompt(user_record.get("preferences", {}))}
                                         ]
                                     
-                                    user_histories[chat_id].append({"role": "system", "content": doc_context})
-                                    user_histories[chat_id].append({"role": "assistant", "content": reply})
+                                    user_histories[session_key].append({"role": "system", "content": doc_context})
+                                    user_histories[session_key].append({"role": "assistant", "content": reply})
                                     
-                                    user_record["history"] = user_histories[chat_id]
+                                    user_record["history"] = user_histories[session_key]
                                     user_record["summaries_today"] = user_record.get("summaries_today", 0) + 1
                                     user_data[sender_str] = user_record
                                     save_user_data(user_data)
@@ -1917,6 +1976,19 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
 
                     # -------- PHOTO MESSAGE --------
                     if "photo" in message:
+                        # If in group, check if bot is mentioned in caption or replied to
+                        if chat_id < 0:
+                            is_mentioned = False
+                            caption = message.get("caption", "").strip()
+                            if bot_username and f"@{bot_username.lower()}" in caption.lower():
+                                is_mentioned = True
+                            elif "reply_to_message" in message:
+                                reply_to = message["reply_to_message"]
+                                if reply_to.get("from", {}).get("username", "").lower() == bot_username.lower():
+                                    is_mentioned = True
+                            if not is_mentioned:
+                                continue
+
                         photo = message["photo"]
                         file_id = photo[-1]["file_id"]
                         caption = message.get("caption", "").strip()
@@ -1981,16 +2053,16 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                                     reply = re.sub(r"\[PREF:\s*(.*?)\]", "", reply).strip()
                                 
                                 # Initialize history
-                                if chat_id not in user_histories:
+                                if session_key not in user_histories:
                                     saved_hist = user_record.get("history", [])
-                                    user_histories[chat_id] = saved_hist if saved_hist else [
+                                    user_histories[session_key] = saved_hist if saved_hist else [
                                         {"role": "system", "content": build_system_prompt(user_record.get("preferences", {}))}
                                     ]
                                 
-                                user_histories[chat_id].append({"role": "user", "content": f"[Image uploaded with caption: {prompt_text}]"})
-                                user_histories[chat_id].append({"role": "assistant", "content": reply})
+                                user_histories[session_key].append({"role": "user", "content": f"[Image uploaded with caption: {prompt_text}]"})
+                                user_histories[session_key].append({"role": "assistant", "content": reply})
                                 
-                                user_record["history"] = user_histories[chat_id]
+                                user_record["history"] = user_histories[session_key]
                                 user_record["images_today"] = user_record.get("images_today", 0) + 1
                                 user_data[sender_str] = user_record
                                 save_user_data(user_data)
@@ -2018,6 +2090,19 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             cmd = cmd_match.group(1).lower()
                             args_str = cmd_match.group(2) or ""
                             args = args_str.split()
+
+                    # Enforce mention requirement for group queries (non-commands)
+                    if cmd is None and chat_id < 0:
+                        is_mentioned = False
+                        if bot_username and f"@{bot_username.lower()}" in text.lower():
+                            is_mentioned = True
+                            text = re.sub(rf"@{re.escape(bot_username)}", "", text, flags=re.IGNORECASE).strip()
+                        elif "reply_to_message" in message:
+                            reply_to = message["reply_to_message"]
+                            if reply_to.get("from", {}).get("username", "").lower() == bot_username.lower():
+                                is_mentioned = True
+                        if not is_mentioned:
+                            continue
 
                     # -------- SPAM DETECTION (Groups Only) --------
                     if chat_id < 0:
@@ -2397,33 +2482,50 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                     # -------- GUIDE --------
                     if cmd in ["guide", "games"]:
                         guide = (
-                            "📖 *MEDUSA GAME GUIDEBOOK* 🐍\n"
-                            "------------------------------------\n"
-                            "Welcome to Medusa's Entertainment and Earning Hub! Play games, earn points, and climb the leaderboard.\n\n"
+                            "📖 *MEDUSA COMPREHENSIVE GAME BOOK* 🐍\n"
+                            "====================================\n\n"
                             "💰 *POINTS & ECONOMY*\n"
-                            "Every user starts with *500 points*.\n"
-                            "• `/balance` - Check your wallet.\n"
-                            "• `/daily` - Claim daily rewards (200 pts, 24h cooldown).\n"
-                            "• `/gift <user> <amount>` - Transfer points to friends.\n"
-                            "• `/leaderboard` - See who is the richest.\n\n"
-                            "⛏️ *MINING GAME*\n"
-                            "Mine resources and sell them for profit!\n"
-                            "• `/mine` - Mine for ores. Cooldown depends on your pickaxe.\n"
-                            "• `/inventory` - Check your pickaxe and mined ores.\n"
-                            "• `/shop` - View pickaxe upgrades.\n"
-                            "• `/buy <pickaxe_name>` - Purchase a better pickaxe.\n"
-                            "• `/sellall` - Sell all your ores for points.\n\n"
-                            "🎰 *CASINO GAMES*\n"
-                            "Bet your points and multiply your wealth!\n"
-                            "• `/slots <bet>` - Play the slot machine.\n"
-                            "• `/coinflip <bet> <heads/tails>` - Flip a coin.\n"
-                            "• `/roulette <bet> <red/black/green/number>` - Classic roulette.\n"
-                            "• `/blackjack <bet>` - Play Blackjack against Medusa.\n\n"
+                            "• `/balance` (or `/bal`) - Check your current wallet points.\n"
+                            "• `/daily` - Claim 200 points every 24 hours.\n"
+                            "• `/gift <user> <amount>` - Gift points to another user.\n"
+                            "• `/leaderboard` (or `/rich`) - View top 10 richest players.\n\n"
+                            "⛏️ *MINING GAME (Step-by-step)*\n"
+                            "1. Type `/mine` to dig for resources. You will receive a mix of ores.\n"
+                            "2. View your current collection and pickaxe with `/inventory`.\n"
+                            "3. Upgrade your pickaxe in `/shop` using `/buy <type>`:\n"
+                            "   - *Stone* (`500 pts`): 45s cooldown | 10-30 yield\n"
+                            "   - *Iron* (`1,500 pts`): 30s cooldown | 20-60 yield\n"
+                            "   - *Diamond* (`5,000 pts`): 15s cooldown | 50-150 yield\n"
+                            "   - *Netherite* (`15,000 pts`): 10s cooldown | 100-300 yield\n"
+                            "4. Sell all gathered ores for points using `/sellall`.\n"
+                            "   - Prices: Coal = `2 pts` | Iron = `5 pts` | Gold = `15 pts` | Diamond = `50 pts` | Medusite = `200 pts`.\n\n"
+                            "🎰 *CASINO GAMES & RULES*\n"
+                            "• *Slots* (`/slots <bet>`):\n"
+                            "  Spins 3 reels. 3 matches payouts: 7️⃣ (50x) | 🎰 (30x) | 💎 (20x) | 🍒 (15x) | 🍇 (10x) | 🍋 (8x).\n"
+                            "  Any 2 matching reels yields a 2x payout. Otherwise you lose the bet.\n"
+                            "• *Coinflip* (`/coinflip <bet> <heads|tails>`):\n"
+                            "  Double-or-nothing coin toss. Correct guess wins 2x bet. Incorrect guess loses bet.\n"
+                            "• *Roulette* (`/roulette <bet> <prediction>`):\n"
+                            "  Prediction can be Red, Black, Green, or a Number (0-36).\n"
+                            "  - Red/Black wins: 2x bet.\n"
+                            "  - Green wins: 35x bet.\n"
+                            "  - Exact number matches win: 35x bet.\n"
+                            "• *Blackjack* (`/blackjack <bet>`):\n"
+                            "  Standard rules. Try to get as close to 21 without busting. Aces count as 1 or 11.\n"
+                            "  - Click `Hit` 🟢 to request another card.\n"
+                            "  - Click `Stand` 🛑 to end your turn. Medusa (dealer) hits until 17+.\n"
+                            "  - Winning pays 2x. Pushing returns your bet. Busting/losing forfeits bet.\n\n"
                             "🎲 *LUDO BOARD RACE*\n"
-                            "Compete with other players in a race to the finish!\n"
-                            "• `/ludo` - Create a Ludo lobby.\n"
-                            "• `/ludo start` - Start the game.\n"
-                            "• Roll the dice to move. If you land on another player, they are kicked back to start! Reach step 30 exactly to win and claim *1,000 points*!"
+                            "A fast-paced board race on a 30-step path played with inline buttons!\n"
+                            "1. Start a lobby with `/ludo` in a group chat.\n"
+                            "2. Other players click `➕ Join Lobby` (up to 4 players total). **Every player must first message the bot in private to register!**\n"
+                            "3. Host starts the game using `🚀 Start Game`.\n"
+                            "4. Take turns clicking `🎲 Roll Dice` to move 1-6 spaces.\n"
+                            "   - *Safe Zones* (Steps 0, 8, 15, 22): You cannot be kicked here.\n"
+                            "   - *Kicking*: Landing on an opponent resets them to 0 (unless they are on a Safe Zone).\n"
+                            "   - *Boost Shortcut*: Step 12 automatically launches you to Step 18.\n"
+                            "   - *Trap Net*: Step 25 pulls you backward to Step 10.\n"
+                            "5. Win: You must reach step 30 exactly. Winner gets `1,000 points`!"
                         )
                         send_message(token, chat_id, guide)
                         continue
@@ -2993,8 +3095,8 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         user_data[sender_str] = user_record
                         save_single_user(sender_str, user_record)
                         
-                        if chat_id in user_histories:
-                            user_histories[chat_id].clear()
+                        if session_key in user_histories:
+                            user_histories[session_key].clear()
                             
                         send_message(
                             token,
@@ -3011,8 +3113,8 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         user_data[sender_str] = user_record
                         save_single_user(sender_str, user_record)
                         
-                        if chat_id in user_histories:
-                            user_histories[chat_id].clear()
+                        if session_key in user_histories:
+                            user_histories[session_key].clear()
                             
                         send_message(
                             token,
@@ -3128,8 +3230,8 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
 
                     # -------- CLEAR HISTORY --------
                     if cmd == "clear":
-                        if chat_id in user_histories:
-                            user_histories[chat_id].clear()
+                        if session_key in user_histories:
+                            user_histories[session_key].clear()
                         user_record["history"] = []
                         user_data[sender_str] = user_record
                         save_single_user(sender_str, user_record)
@@ -3263,15 +3365,15 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                                     reply = re.sub(r"\[PREF:\s*(.*?)\]", "", reply).strip()
                                 
                                 # Add to history
-                                if chat_id not in user_histories:
+                                if session_key not in user_histories:
                                     saved_hist = user_record.get("history", [])
-                                    user_histories[chat_id] = saved_hist if saved_hist else [
+                                    user_histories[session_key] = saved_hist if saved_hist else [
                                         {"role": "system", "content": build_system_prompt(user_record.get("preferences", {}))}
                                     ]
-                                user_histories[chat_id].append({"role": "user", "content": f"Search Query: {search_query}"})
-                                user_histories[chat_id].append({"role": "assistant", "content": reply})
+                                user_histories[session_key].append({"role": "user", "content": f"Search Query: {search_query}"})
+                                user_histories[session_key].append({"role": "assistant", "content": reply})
                                 
-                                user_record["history"] = user_histories[chat_id]
+                                user_record["history"] = user_histories[session_key]
                                 user_record["searches_today"] = user_record.get("searches_today", 0) + 1
                                 user_data[sender_str] = user_record
                                 save_user_data(user_data)
@@ -3360,28 +3462,28 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             user_data[sender_str] = user_record
                             save_user_data(user_data)
 
-                    if not user_histories.get(chat_id):
+                    if not user_histories.get(session_key):
                         saved_hist = user_record.get("history", [])
-                        user_histories[chat_id] = saved_hist if saved_hist else [
+                        user_histories[session_key] = saved_hist if saved_hist else [
                             {"role": "system", "content": build_system_prompt(user_record.get("preferences", {}))}
                         ]
                     else:
-                        user_histories[chat_id][0] = {"role": "system", "content": build_system_prompt(user_record.get("preferences", {}))}
+                        user_histories[session_key][0] = {"role": "system", "content": build_system_prompt(user_record.get("preferences", {}))}
 
                     user_msg = text
                     if custom_context:
                         user_msg += custom_context
                         
-                    user_histories[chat_id].append({"role": "user", "content": user_msg})
+                    user_histories[session_key].append({"role": "user", "content": user_msg})
 
-                    if len(user_histories[chat_id]) > 16:
-                        user_histories[chat_id] = [user_histories[chat_id][0]] + user_histories[chat_id][-15:]
+                    if len(user_histories[session_key]) > 16:
+                        user_histories[session_key] = [user_histories[session_key][0]] + user_histories[session_key][-15:]
 
                     try:
                         if active_mode == "medusa":
-                            reply = ask_medusa_with_failover(cyberneurova_keys, user_histories[chat_id])
+                            reply = ask_medusa_with_failover(cyberneurova_keys, user_histories[session_key])
                         else:
-                            reply = ask_groq_with_failover(groq_keys, user_histories[chat_id])
+                            reply = ask_groq_with_failover(groq_keys, user_histories[session_key])
                         
                         # Process preferences from response
                         pref_match = re.search(r"\[PREF:\s*(.*?)\]", reply)
@@ -3393,10 +3495,10 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                                     user_record.setdefault("preferences", {})[k.strip().lower()] = v.strip()
                             reply = re.sub(r"\[PREF:\s*(.*?)\]", "", reply).strip()
 
-                        user_histories[chat_id].append({"role": "assistant", "content": reply})
+                        user_histories[session_key].append({"role": "assistant", "content": reply})
                         
                         # Save history and preferences in database
-                        user_record["history"] = user_histories[chat_id]
+                        user_record["history"] = user_histories[session_key]
                         user_data[sender_str] = user_record
                         save_user_data(user_data)
                         
