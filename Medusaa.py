@@ -797,17 +797,17 @@ def markdown_to_html(text):
     # _italic_ -> <i>
     escaped = re.sub(r"_(.*?)_", r"<i>\1</i>", escaped)
     
-    # Now restore inline code blocks
-    for idx, code in enumerate(inline_codes):
+    # Now restore inline code blocks in reverse order to prevent prefix replacement collisions
+    for idx in range(len(inline_codes) - 1, -1, -1):
+        code = inline_codes[idx]
         escaped = escaped.replace(f"INLINECODEPLACEHOLDER{idx}", f"<code>{code}</code>")
         
-    # Restore block code blocks
-    for idx, block in enumerate(code_blocks):
-        # Extract the content inside backticks again
+    # Restore block code blocks in reverse order to prevent prefix replacement collisions
+    for idx in range(len(code_blocks) - 1, -1, -1):
+        block = code_blocks[idx]
         match = re.match(r"```(?:[a-zA-Z0-9+#-]+)?\s*?\n?(.*?)```", block, flags=re.DOTALL)
         if match:
             code_content = match.group(1)
-            # Wrap in <pre><code>
             escaped = escaped.replace(f"BLOCKCODEPLACEHOLDER{idx}", f"<pre><code>{code_content}</code></pre>")
         else:
             escaped = escaped.replace(f"BLOCKCODEPLACEHOLDER{idx}", block)
@@ -841,24 +841,75 @@ def send_message(token, chat_id, text, reply_markup=None):
             time.sleep(0.3)
 
 
-def set_bot_commands(token):
-    url = f"https://api.telegram.org/bot{token}/setMyCommands"
-    commands = [
+def set_bot_commands(token, admin_id, user_data=None):
+    default_cmds = [
         {"command": "start", "description": "Wake up Medusa 🐍"},
         {"command": "help", "description": "Show list of commands ℹ️"},
-        {"command": "medusa", "description": "Switch to Premium Mode (4 credits/day) 🌟"},
-        {"command": "default", "description": "Switch to Default Mode (Free, Unlimited) 🔓"},
-        {"command": "upgrade", "description": "Upgrade to Unlimited Premium for $2 🚀"},
-        {"command": "check", "description": "Check current mode and remaining limit 📊"},
+        {"command": "ludo", "description": "Create Ludo board race lobby 🎲"},
+        {"command": "balance", "description": "Check point balance 💰"},
+        {"command": "daily", "description": "Claim daily rewards 🎁"},
+        {"command": "gift", "description": "Gift points to a friend 🎁"},
+        {"command": "leaderboard", "description": "View richest users 🏆"},
+        {"command": "guide", "description": "View full games guidebook 📖"},
+        {"command": "check", "description": "Check current mode and limits 📊"},
         {"command": "clear", "description": "Clear your conversation history 🧹"},
-        {"command": "search", "description": "Toggle web search / search directly 🔍"}
+        {"command": "search", "description": "Toggle web search 🔍"},
+        {"command": "medusa", "description": "Switch to Premium Mode 🌟"},
+        {"command": "default", "description": "Switch to Default Mode 🔓"}
     ]
+    
+    group_admin_cmds = [
+        {"command": "help", "description": "Show list of commands ℹ️"},
+        {"command": "ludo", "description": "Create Ludo board race lobby 🎲"},
+        {"command": "kick", "description": "Kick a member 🥾"},
+        {"command": "ban", "description": "Ban a member 🔨"},
+        {"command": "unban", "description": "Unban a member 🔓"},
+        {"command": "mute", "description": "Mute a member 🔇"},
+        {"command": "unmute", "description": "Unmute a member 🔊"}
+    ]
+    
+    bot_admin_cmds = default_cmds + [
+        {"command": "admin", "description": "Access Admin Dashboard 👑"},
+        {"command": "subadmin", "description": "Promote/demote subadmins 🛠️"},
+        {"command": "export", "description": "Export target user profile 📤"},
+        {"command": "kick", "description": "Kick a member 🥾"},
+        {"command": "ban", "description": "Ban a member 🔨"},
+        {"command": "unban", "description": "Unban a member 🔓"},
+        {"command": "mute", "description": "Mute a member 🔇"},
+        {"command": "unmute", "description": "Unmute a member 🔊"}
+    ]
+    
     try:
-        r = requests.post(url, json={"commands": commands}, timeout=10)
-        if r.status_code == 200:
-            print("Successfully registered bot commands with Telegram.")
-        else:
-            print(f"Failed to register bot commands: {r.text}")
+        # Register default
+        requests.post(f"https://api.telegram.org/bot{token}/setMyCommands", json={
+            "commands": default_cmds,
+            "scope": {"type": "default"}
+        }, timeout=10)
+        
+        # Register group admins
+        requests.post(f"https://api.telegram.org/bot{token}/setMyCommands", json={
+            "commands": group_admin_cmds,
+            "scope": {"type": "all_chat_administrators"}
+        }, timeout=10)
+        
+        # Register bot owner
+        if admin_id:
+            requests.post(f"https://api.telegram.org/bot{token}/setMyCommands", json={
+                "commands": bot_admin_cmds,
+                "scope": {"type": "chat", "chat_id": int(admin_id)}
+            }, timeout=10)
+            
+        # Register subadmins
+        if user_data:
+            for uid, info in user_data.items():
+                if info.get("role") == "subadmin":
+                    try:
+                        requests.post(f"https://api.telegram.org/bot{token}/setMyCommands", json={
+                            "commands": bot_admin_cmds,
+                            "scope": {"type": "chat", "chat_id": int(uid)}
+                        }, timeout=10)
+                    except Exception:
+                        pass
     except Exception as e:
         print(f"Error setting bot commands: {e}")
 
@@ -996,7 +1047,6 @@ def notify_admin_upgrade_request(token, admin_id, requester_id, requester_name, 
 # =================================
 
 active_ludo_games = {}
-active_blackjacks = {}
 user_message_times = {}
 
 def is_user_group_admin(token, chat_id, user_id, admin_id, user_data):
@@ -1108,60 +1158,7 @@ def send_document(token, chat_id, file_name, file_content):
         print(f"Error sending document: {e}")
         return False
 
-def get_hand_value(hand):
-    value = 0
-    aces = 0
-    for card in hand:
-        val_str = card.split()[0][:-2] if " " in card else card[:-2]
-        if not val_str:
-            val_str = card[0]
-        if val_str in ["J", "Q", "K"]:
-            value += 10
-        elif val_str == "A":
-            value += 11
-            aces += 1
-        else:
-            try:
-                value += int(val_str)
-            except:
-                value += 10
-    while value > 21 and aces > 0:
-        value -= 10
-        aces -= 1
-    return value
 
-def render_blackjack(game, username, status="playing"):
-    p_hand = game["player_hand"]
-    d_hand = game["dealer_hand"]
-    p_val = get_hand_value(p_hand)
-    d_val = get_hand_value(d_hand)
-    
-    lines = []
-    lines.append("🃏 *MEDUSA BLACKJACK* 🃏")
-    lines.append("--------------------------------")
-    lines.append(f"💵 Bet: `{game['bet']} points`\n")
-    
-    if status == "playing":
-        lines.append(f"🐍 *Medusa (Dealer)* Hand: `[ 🎴 Hidden, {d_hand[1]} ]` (Val: ?)")
-    else:
-        d_cards = ", ".join(d_hand)
-        lines.append(f"🐍 *Medusa (Dealer)* Hand: `[ {d_cards} ]` (Val: `{d_val}`)")
-        
-    p_cards = ", ".join(p_hand)
-    lines.append(f"👤 *{username}* Hand: `[ {p_cards} ]` (Val: `{p_val}`)\n")
-    
-    if status == "playing":
-        lines.append("Choose your move:")
-    elif status == "win":
-        lines.append("🎉 *You Win!* You won double your bet.")
-    elif status == "lose":
-        lines.append("💀 *You Lose!* Medusa took your bet.")
-    elif status == "bust":
-        lines.append("💥 *Busted!* You went over 21.")
-    elif status == "push":
-        lines.append("🤝 *Push!* It's a tie. Bet returned.")
-        
-    return "\n".join(lines)
 
 def render_ludo_board(game):
     lines = []
@@ -1470,91 +1467,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         )
                         update_admin_panel(token, chat_id, msg_id, admin_id)
 
-                    # -------- BLACKJACK GAMEPLAY CALLBACKS --------
-                    elif callback_data.startswith("bj_hit_") or callback_data.startswith("bj_stand_"):
-                        target_user_id = callback_data.split("_")[-1]
-                        if str(sender_id) != str(target_user_id):
-                            requests.post(
-                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
-                                data={"callback_query_id": callback_query["id"], "text": "This is not your game, mortal! 🚫", "show_alert": True}
-                            )
-                            continue
-                        
-                        game_key = f"{chat_id}_{sender_id}"
-                        if game_key not in active_blackjacks:
-                            requests.post(
-                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
-                                data={"callback_query_id": callback_query["id"], "text": "Game not found! Please start a new game with /blackjack."}
-                            )
-                            requests.post(f"https://api.telegram.org/bot{token}/editMessageReplyMarkup", json={"chat_id": chat_id, "message_id": msg_id, "reply_markup": None})
-                            continue
-                        
-                        game = active_blackjacks[game_key]
-                        user_rec = user_data.get(str(sender_id), {})
-                        
-                        if callback_data.startswith("bj_hit_"):
-                            game["player_hand"].append(game["deck"].pop())
-                            p_val = get_hand_value(game["player_hand"])
-                            
-                            if p_val > 21:
-                                user_rec["points"] = user_rec.get("points", 500) - game["bet"]
-                                save_single_user(str(sender_id), user_rec)
-                                board_text = render_blackjack(game, user_rec.get("first_name", "User"), "bust")
-                                active_blackjacks.pop(game_key)
-                                
-                                requests.post(
-                                    f"https://api.telegram.org/bot{token}/editMessageText",
-                                    data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(board_text), "parse_mode": "HTML", "reply_markup": None}
-                                )
-                            else:
-                                board_text = render_blackjack(game, user_rec.get("first_name", "User"), "playing")
-                                reply_markup = {
-                                    "inline_keyboard": [
-                                        [
-                                            {"text": "🟢 Hit", "callback_data": f"bj_hit_{sender_id}"},
-                                            {"text": "🛑 Stand", "callback_data": f"bj_stand_{sender_id}"}
-                                        ]
-                                    ]
-                                }
-                                requests.post(
-                                    f"https://api.telegram.org/bot{token}/editMessageText",
-                                    data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(board_text), "parse_mode": "HTML", "reply_markup": json.dumps(reply_markup)}
-                                )
-                                
-                        elif callback_data.startswith("bj_stand_"):
-                            d_val = get_hand_value(game["dealer_hand"])
-                            while d_val < 17:
-                                game["dealer_hand"].append(game["deck"].pop())
-                                d_val = get_hand_value(game["dealer_hand"])
-                                
-                            p_val = get_hand_value(game["player_hand"])
-                            
-                            status = "lose"
-                            if d_val > 21:
-                                status = "win"
-                            elif p_val > d_val:
-                                status = "win"
-                            elif p_val < d_val:
-                                status = "lose"
-                            else:
-                                status = "push"
-                                
-                            if status == "win":
-                                user_rec["points"] = user_rec.get("points", 500) + game["bet"]
-                            elif status == "lose":
-                                user_rec["points"] = user_rec.get("points", 500) - game["bet"]
-                            
-                            save_single_user(str(sender_id), user_rec)
-                            board_text = render_blackjack(game, user_rec.get("first_name", "User"), status)
-                            active_blackjacks.pop(game_key)
-                            
-                            requests.post(
-                                f"https://api.telegram.org/bot{token}/editMessageText",
-                                data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(board_text), "parse_mode": "HTML", "reply_markup": None}
-                            )
-                        
-                        requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"]})
-                        continue
+
 
                     # -------- LUDO GAMEPLAY CALLBACKS --------
                     elif callback_data.startswith("ludo_join_") or callback_data.startswith("ludo_start_") or callback_data.startswith("ludo_cancel_") or callback_data.startswith("ludo_roll_"):
@@ -2243,6 +2156,10 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                                 continue
                             tgt_rec["role"] = "subadmin"
                             save_single_user(tgt_id, tgt_rec)
+                            
+                            # Dynamically register admin commands for the new subadmin
+                            set_bot_commands(token, admin_id, user_data)
+                            
                             send_message(token, chat_id, f"🎉 *{tgt_name}* promoted to *Subadmin*! They can now access the admin panel.")
                         elif sub_action == "demote":
                             if tgt_rec.get("role") != "subadmin":
@@ -2250,6 +2167,15 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                                 continue
                             tgt_rec["role"] = "user"
                             save_single_user(tgt_id, tgt_rec)
+                            
+                            # Remove custom admin commands for the demoted user (reverts to default scope)
+                            try:
+                                requests.post(f"https://api.telegram.org/bot{token}/deleteMyCommands", json={
+                                    "scope": {"type": "chat", "chat_id": int(tgt_id)}
+                                }, timeout=10)
+                            except Exception:
+                                pass
+                                
                             send_message(token, chat_id, f"📉 *{tgt_name}* demoted to regular User.")
                         else:
                             send_message(token, chat_id, "⚠️ Unknown subadmin action.")
@@ -2296,21 +2222,12 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             "• `/mood <normal|angry>` - Adjust mood 🎭\n"
                             "• `/temp <0.1-1.0>` - Adjust creativity 🌡️\n\n"
                             "🎮 *Games & Economy*:\n"
+                            "• `/ludo` - Create Ludo board race lobby 🎲\n"
                             "• `/balance` - Check point balance 💰\n"
                             "• `/daily` - Claim daily point reward 🎁\n"
                             "• `/gift <user> <amount>` - Transfer points 🎁\n"
                             "• `/leaderboard` - See richest users 🏆\n"
-                            "• `/guide` - View full games guidebook 📖\n"
-                            "• `/mine` - Go mining for ores ⛏️\n"
-                            "• `/inventory` - View mined ores 🎒\n"
-                            "• `/shop` - Upgrade mining pickaxe 🛒\n"
-                            "• `/buy <type>` - Buy upgrade ⛏️\n"
-                            "• `/sellall` - Sell all ores for points 💰\n"
-                            "• `/slots <bet>` - Play slot machine 🎰\n"
-                            "• `/coinflip <bet> <side>` - Flip coin 🪙\n"
-                            "• `/roulette <bet> <prediction>` - Spin roulette 🎡\n"
-                            "• `/blackjack <bet>` - Play blackjack 🃏\n"
-                            "• `/ludo` - Create Ludo board race lobby 🎲"
+                            "• `/guide` - View full games guidebook 📖"
                         )
                         is_sub = (user_record.get("role") == "subadmin")
                         if sender_str == str(admin_id) or is_sub:
@@ -2489,32 +2406,6 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             "• `/daily` - Claim 200 points every 24 hours.\n"
                             "• `/gift <user> <amount>` - Gift points to another user.\n"
                             "• `/leaderboard` (or `/rich`) - View top 10 richest players.\n\n"
-                            "⛏️ *MINING GAME (Step-by-step)*\n"
-                            "1. Type `/mine` to dig for resources. You will receive a mix of ores.\n"
-                            "2. View your current collection and pickaxe with `/inventory`.\n"
-                            "3. Upgrade your pickaxe in `/shop` using `/buy <type>`:\n"
-                            "   - *Stone* (`500 pts`): 45s cooldown | 10-30 yield\n"
-                            "   - *Iron* (`1,500 pts`): 30s cooldown | 20-60 yield\n"
-                            "   - *Diamond* (`5,000 pts`): 15s cooldown | 50-150 yield\n"
-                            "   - *Netherite* (`15,000 pts`): 10s cooldown | 100-300 yield\n"
-                            "4. Sell all gathered ores for points using `/sellall`.\n"
-                            "   - Prices: Coal = `2 pts` | Iron = `5 pts` | Gold = `15 pts` | Diamond = `50 pts` | Medusite = `200 pts`.\n\n"
-                            "🎰 *CASINO GAMES & RULES*\n"
-                            "• *Slots* (`/slots <bet>`):\n"
-                            "  Spins 3 reels. 3 matches payouts: 7️⃣ (50x) | 🎰 (30x) | 💎 (20x) | 🍒 (15x) | 🍇 (10x) | 🍋 (8x).\n"
-                            "  Any 2 matching reels yields a 2x payout. Otherwise you lose the bet.\n"
-                            "• *Coinflip* (`/coinflip <bet> <heads|tails>`):\n"
-                            "  Double-or-nothing coin toss. Correct guess wins 2x bet. Incorrect guess loses bet.\n"
-                            "• *Roulette* (`/roulette <bet> <prediction>`):\n"
-                            "  Prediction can be Red, Black, Green, or a Number (0-36).\n"
-                            "  - Red/Black wins: 2x bet.\n"
-                            "  - Green wins: 35x bet.\n"
-                            "  - Exact number matches win: 35x bet.\n"
-                            "• *Blackjack* (`/blackjack <bet>`):\n"
-                            "  Standard rules. Try to get as close to 21 without busting. Aces count as 1 or 11.\n"
-                            "  - Click `Hit` 🟢 to request another card.\n"
-                            "  - Click `Stand` 🛑 to end your turn. Medusa (dealer) hits until 17+.\n"
-                            "  - Winning pays 2x. Pushing returns your bet. Busting/losing forfeits bet.\n\n"
                             "🎲 *LUDO BOARD RACE*\n"
                             "A fast-paced board race on a 30-step path played with inline buttons!\n"
                             "1. Start a lobby with `/ludo` in a group chat.\n"
@@ -2530,391 +2421,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         send_message(token, chat_id, guide)
                         continue
 
-                    # -------- MINE ORES --------
-                    if cmd == "mine":
-                        now = time.time()
-                        last_mine = user_record.get("last_mine_time", 0.0)
-                        pickaxe = user_record.get("pickaxe", "wooden")
-                        
-                        stats = {
-                            "wooden": {"cooldown": 60, "min_y": 5, "max_y": 15},
-                            "stone": {"cooldown": 45, "min_y": 10, "max_y": 30},
-                            "iron": {"cooldown": 30, "min_y": 20, "max_y": 60},
-                            "diamond": {"cooldown": 15, "min_y": 50, "max_y": 150},
-                            "netherite": {"cooldown": 10, "min_y": 100, "max_y": 300}
-                        }
-                        
-                        p_stats = stats.get(pickaxe, stats["wooden"])
-                        cd = p_stats["cooldown"]
-                        
-                        if now - last_mine < cd:
-                            remaining = cd - (now - last_mine)
-                            send_message(token, chat_id, f"⏳ Your arm is tired, miner! Cooldown remaining: `{remaining:.1f}s`.")
-                            continue
-                        
-                        import random
-                        total_units = random.randint(p_stats["min_y"], p_stats["max_y"])
-                        
-                        mined = {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0}
-                        for _ in range(total_units):
-                            roll = random.random()
-                            if roll < 0.50:
-                                mined["coal"] += 1
-                            elif roll < 0.80:
-                                mined["iron"] += 1
-                            elif roll < 0.94:
-                                mined["gold"] += 1
-                            elif roll < 0.99:
-                                mined["diamond"] += 1
-                            else:
-                                mined["medusite"] += 1
-                                
-                        inv = user_record.get("inventory", {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0})
-                        for ore, qty in mined.items():
-                            inv[ore] = inv.get(ore, 0) + qty
-                        
-                        user_record["inventory"] = inv
-                        user_record["last_mine_time"] = now
-                        save_single_user(sender_str, user_record)
-                        
-                        lines = [f"⛏️ *You went mining with your {pickaxe.capitalize()} Pickaxe!*", "--------------------------------------"]
-                        ore_emojis = {"coal": "⚫ Coal", "iron": "⚙️ Iron", "gold": "🟡 Gold", "diamond": "💎 Diamond", "medusite": "🐍 Medusite"}
-                        found = False
-                        for ore, qty in mined.items():
-                            if qty > 0:
-                                lines.append(f"• Found {qty}x {ore_emojis[ore]}")
-                                found = True
-                        if not found:
-                            lines.append("You found nothing but dirt! 🪨")
-                        
-                        send_message(token, chat_id, "\n".join(lines))
-                        continue
 
-                    # -------- INVENTORY --------
-                    if cmd in ["inventory", "bag"]:
-                        inv = user_record.get("inventory", {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0})
-                        pickaxe = user_record.get("pickaxe", "wooden")
-                        
-                        lines = [f"🎒 *{first_name}'s Inventory*:", f"• Tool: `{pickaxe.capitalize()} Pickaxe` ⛏️", "--------------------------------------"]
-                        ore_emojis = {"coal": "⚫ Coal", "iron": "⚙️ Iron", "gold": "🟡 Gold", "diamond": "💎 Diamond", "medusite": "🐍 Medusite"}
-                        for ore, qty in inv.items():
-                            lines.append(f"• {ore_emojis[ore]}: `{qty}`")
-                        
-                        lines.append("\nUse `/sellall` to sell everything.")
-                        send_message(token, chat_id, "\n".join(lines))
-                        continue
-
-                    # -------- SHOP --------
-                    if cmd == "shop":
-                        shop_msg = (
-                            "🛒 *MEDUSA PICKAXE SHOP* ⛏️\n"
-                            "Upgrade your tool to mine faster and get richer yields!\n"
-                            "--------------------------------------\n"
-                            "1. *Stone Pickaxe* 🪨\n"
-                            "   • Price: `500 points`\n"
-                            "   • Cooldown: `45s` | Yield: `10-30`\n\n"
-                            "2. *Iron Pickaxe* ⚙️\n"
-                            "   • Price: `1,500 points`\n"
-                            "   • Cooldown: `30s` | Yield: `20-60`\n\n"
-                            "3. *Diamond Pickaxe* 💎\n"
-                            "   • Price: `5,000 points`\n"
-                            "   • Cooldown: `15s` | Yield: `50-150`\n\n"
-                            "4. *Netherite Pickaxe* 🔥\n"
-                            "   • Price: `15,000 points`\n"
-                            "   • Cooldown: `10s` | Yield: `100-300`\n\n"
-                            "Use `/buy <stone|iron|diamond|netherite>` to purchase!"
-                        )
-                        send_message(token, chat_id, shop_msg)
-                        continue
-
-                    # -------- BUY UPGRADE --------
-                    if cmd == "buy":
-                        if not args:
-                            send_message(token, chat_id, "⚠️ Usage: `/buy <stone|iron|diamond|netherite>`")
-                            continue
-                        
-                        tool = args[0].lower()
-                        prices = {
-                            "stone": 500,
-                            "iron": 1500,
-                            "diamond": 5000,
-                            "netherite": 15000
-                        }
-                        
-                        if tool not in prices:
-                            send_message(token, chat_id, "⚠️ Unknown item. Choose from: `stone`, `iron`, `diamond`, `netherite`.")
-                            continue
-                        
-                        current_tool = user_record.get("pickaxe", "wooden")
-                        if current_tool == tool:
-                            send_message(token, chat_id, f"⚠️ You already own the {tool.capitalize()} Pickaxe!")
-                            continue
-                        
-                        levels = {"wooden": 0, "stone": 1, "iron": 2, "diamond": 3, "netherite": 4}
-                        if levels.get(current_tool, 0) > levels.get(tool, 0):
-                            send_message(token, chat_id, "😏 Medusa will not let you downgrade your tools.")
-                            continue
-                            
-                        price = prices[tool]
-                        my_pts = user_record.get("points", 500)
-                        if my_pts < price:
-                            send_message(token, chat_id, f"⚠️ You do not have enough points. Cost: `{price} pts` | Balance: `{my_pts} pts`.")
-                            continue
-                            
-                        user_record["points"] = my_pts - price
-                        user_record["pickaxe"] = tool
-                        save_single_user(sender_str, user_record)
-                        
-                        send_message(token, chat_id, f"🎉 *Purchase Successful!*\nYou upgraded to a *{tool.capitalize()} Pickaxe*! Balance: `{user_record['points']} points`.")
-                        continue
-
-                    # -------- SELL ORES --------
-                    if cmd == "sellall":
-                        inv = user_record.get("inventory", {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0})
-                        prices = {"coal": 2, "iron": 5, "gold": 15, "diamond": 50, "medusite": 200}
-                        
-                        total_earned = 0
-                        items_sold = 0
-                        for ore, qty in inv.items():
-                            if qty > 0:
-                                total_earned += qty * prices.get(ore, 0)
-                                items_sold += qty
-                                inv[ore] = 0
-                                
-                        if total_earned == 0:
-                            send_message(token, chat_id, "⚠️ Your inventory is empty! Go mine first using `/mine`.")
-                            continue
-                            
-                        user_record["inventory"] = inv
-                        user_record["points"] = user_record.get("points", 500) + total_earned
-                        save_single_user(sender_str, user_record)
-                        
-                        send_message(token, chat_id, f"💰 *Sales Receipt:*\nSold `{items_sold}` ores for a total of `{total_earned} points`!\nNew balance: `{user_record['points']} points`.")
-                        continue
-
-                    # -------- SLOTS --------
-                    if cmd == "slots":
-                        if not args:
-                            send_message(token, chat_id, "⚠️ Usage: `/slots <bet>`")
-                            continue
-                        try:
-                            bet = int(args[0])
-                            if bet <= 0:
-                                raise ValueError
-                        except:
-                            send_message(token, chat_id, "⚠️ Please specify a valid positive bet amount.")
-                            continue
-                            
-                        my_pts = user_record.get("points", 500)
-                        if my_pts < bet:
-                            send_message(token, chat_id, f"⚠️ You do not have enough points to bet. Balance: `{my_pts} pts`.")
-                            continue
-                            
-                        import random
-                        emojis = ["🍒", "🍋", "🍇", "💎", "🎰", "7️⃣"]
-                        row = [random.choice(emojis) for _ in range(3)]
-                        
-                        match_count = len(set(row))
-                        won = False
-                        multiplier = 0
-                        
-                        if match_count == 1:
-                            won = True
-                            target = row[0]
-                            multipliers = {"🍒": 15, "🍋": 8, "🍇": 10, "💎": 20, "🎰": 30, "7️⃣": 50}
-                            multiplier = multipliers.get(target, 5)
-                        elif match_count == 2:
-                            won = True
-                            multiplier = 2
-                            
-                        if won:
-                            winnings = bet * multiplier
-                            user_record["points"] = my_pts - bet + winnings
-                            result_text = f"🎉 *Match!* You won `{winnings} points`! ({multiplier}x)"
-                        else:
-                            user_record["points"] = my_pts - bet
-                            result_text = "💀 *Lose!* Better luck next time."
-                            
-                        save_single_user(sender_str, user_record)
-                        
-                        slots_display = (
-                            "🎰 *SLOT MACHINE* 🎰\n"
-                            "---------------------\n"
-                            f"| {row[0]} | {row[1]} | {row[2]} |\n"
-                            "---------------------\n"
-                            f"{result_text}\n"
-                            f"Wallet: `{user_record['points']} points`"
-                        )
-                        send_message(token, chat_id, slots_display)
-                        continue
-
-                    # -------- COINFLIP --------
-                    if cmd in ["coinflip", "cf"]:
-                        if len(args) < 2:
-                            send_message(token, chat_id, "⚠️ Usage: `/coinflip <bet> <heads|tails>`")
-                            continue
-                        try:
-                            bet = int(args[0])
-                            if bet <= 0:
-                                raise ValueError
-                        except:
-                            send_message(token, chat_id, "⚠️ Please specify a valid positive bet amount.")
-                            continue
-                            
-                        guess = args[1].lower()
-                        if guess not in ["heads", "tails", "h", "t"]:
-                            send_message(token, chat_id, "⚠️ Choose either `heads` or `tails`.")
-                            continue
-                        if guess == "h": guess = "heads"
-                        if guess == "t": guess = "tails"
-                        
-                        my_pts = user_record.get("points", 500)
-                        if my_pts < bet:
-                            send_message(token, chat_id, f"⚠️ You do not have enough points. Balance: `{my_pts} pts`.")
-                            continue
-                            
-                        import random
-                        outcome = random.choice(["heads", "tails"])
-                        coin_emoji = "🪙 (Heads)" if outcome == "heads" else "🪙 (Tails)"
-                        
-                        if guess == outcome:
-                            user_record["points"] = my_pts + bet
-                            result = f"🎉 *You Won!* The coin landed on {coin_emoji}. You gained `{bet} points`."
-                        else:
-                            user_record["points"] = my_pts - bet
-                            result = f"💀 *You Lost!* The coin landed on {coin_emoji}. You lost `{bet} points`."
-                            
-                        save_single_user(sender_str, user_record)
-                        send_message(token, chat_id, f"{result}\nBalance: `{user_record['points']} points`")
-                        continue
-
-                    # -------- ROULETTE --------
-                    if cmd == "roulette":
-                        if len(args) < 2:
-                            send_message(token, chat_id, "⚠️ Usage: `/roulette <bet> <red|black|green|number(0-36)>`")
-                            continue
-                        try:
-                            bet = int(args[0])
-                            if bet <= 0:
-                                raise ValueError
-                        except:
-                            send_message(token, chat_id, "⚠️ Please specify a valid positive bet amount.")
-                            continue
-                            
-                        prediction = args[1].lower()
-                        is_number = prediction.isdigit() and (0 <= int(prediction) <= 36)
-                        is_color = prediction in ["red", "black", "green"]
-                        
-                        if not is_number and not is_color:
-                            send_message(token, chat_id, "⚠️ Predict either `red`, `black`, `green`, or a specific number between `0` and `36`.")
-                            continue
-                            
-                        my_pts = user_record.get("points", 500)
-                        if my_pts < bet:
-                            send_message(token, chat_id, f"⚠️ You do not have enough points. Balance: `{my_pts} pts`.")
-                            continue
-                            
-                        import random
-                        roll = random.randint(0, 36)
-                        
-                        red_numbers = [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36]
-                        if roll == 0:
-                            roll_color = "green"
-                        elif roll in red_numbers:
-                            roll_color = "red"
-                        else:
-                            roll_color = "black"
-                            
-                        won = False
-                        payout = 0
-                        if is_color:
-                            if prediction == roll_color:
-                                won = True
-                                payout = bet * 35 if roll_color == "green" else bet * 2
-                        elif is_number:
-                            if int(prediction) == roll:
-                                won = True
-                                payout = bet * 35
-                                
-                        color_emoji = "🔴" if roll_color == "red" else ("⚫" if roll_color == "black" else "🟢")
-                        roll_desc = f"{color_emoji} *{roll} {roll_color.upper()}*"
-                        
-                        if won:
-                            user_record["points"] = my_pts - bet + payout
-                            result = f"🎉 *Winner!* Roulette rolled {roll_desc}. You won `{payout} points`!"
-                        else:
-                            user_record["points"] = my_pts - bet
-                            result = f"💀 *Loser!* Roulette rolled {roll_desc}. You lost `{bet} points`."
-                            
-                        save_single_user(sender_str, user_record)
-                        send_message(token, chat_id, f"{result}\nBalance: `{user_record['points']} points`")
-                        continue
-
-                    # -------- BLACKJACK --------
-                    if cmd in ["blackjack", "bj"]:
-                        if not args:
-                            send_message(token, chat_id, "⚠️ Usage: `/blackjack <bet>`")
-                            continue
-                        try:
-                            bet = int(args[0])
-                            if bet <= 0:
-                                raise ValueError
-                        except:
-                            send_message(token, chat_id, "⚠️ Please specify a valid positive bet amount.")
-                            continue
-                            
-                        my_pts = user_record.get("points", 500)
-                        if my_pts < bet:
-                            send_message(token, chat_id, f"⚠️ You do not have enough points. Balance: `{my_pts} pts`.")
-                            continue
-                            
-                        game_key = f"{chat_id}_{sender_id}"
-                        if game_key in active_blackjacks:
-                            send_message(token, chat_id, "⚠️ You already have an active Blackjack game in progress!")
-                            continue
-                            
-                        import random
-                        suits = ["❤️", "♦️", "♣️", "♠️"]
-                        ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
-                        deck = [f"{r}{s}" for r in ranks for s in suits]
-                        random.shuffle(deck)
-                        
-                        p_hand = [deck.pop(), deck.pop()]
-                        d_hand = [deck.pop(), deck.pop()]
-                        
-                        active_blackjacks[game_key] = {
-                            "bet": bet,
-                            "deck": deck,
-                            "player_hand": p_hand,
-                            "dealer_hand": d_hand,
-                            "msg_id": None
-                        }
-                        
-                        game_text = render_blackjack(active_blackjacks[game_key], first_name, "playing")
-                        reply_markup = {
-                            "inline_keyboard": [
-                                [
-                                    {"text": "🟢 Hit", "callback_data": f"bj_hit_{sender_id}"},
-                                    {"text": "🛑 Stand", "callback_data": f"bj_stand_{sender_id}"}
-                                ]
-                            ]
-                        }
-                        
-                        url = f"https://api.telegram.org/bot{token}/sendMessage"
-                        data = {
-                            "chat_id": chat_id,
-                            "text": markdown_to_html(game_text),
-                            "parse_mode": "HTML",
-                            "reply_markup": json.dumps(reply_markup)
-                        }
-                        try:
-                            r = requests.post(url, data=data, timeout=10).json()
-                            msg_id = r.get("result", {}).get("message_id")
-                            active_blackjacks[game_key]["msg_id"] = msg_id
-                        except Exception as e:
-                            print(f"Error starting blackjack message: {e}")
-                            active_blackjacks.pop(game_key, None)
-                        continue
 
                     # -------- LUDO --------
                     if cmd == "ludo":
@@ -3549,7 +3056,8 @@ def start():
     banner()
 
     # Register commands with Telegram
-    set_bot_commands(token)
+    db_data = load_user_data()
+    set_bot_commands(token, chat_id, db_data)
 
     # Start a dummy health check HTTP server for Render Web Service compatibility
     web_thread = threading.Thread(target=run_health_check_server, daemon=True)
