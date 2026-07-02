@@ -337,6 +337,30 @@ def save_user_data(data):
             print(Fore.RED + f"🔴 Error saving to MongoDB: {e}")
 
 
+def save_single_user(uid, record):
+    global mongo_db
+    local_data = {}
+    if os.path.exists(USER_DATA_FILE):
+        try:
+            with open(USER_DATA_FILE, "r") as f:
+                local_data = json.load(f)
+        except:
+            pass
+    local_data[str(uid)] = record
+    try:
+        with open(USER_DATA_FILE, "w") as f:
+            json.dump(local_data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving local backup: {e}")
+
+    if mongo_db is not None:
+        try:
+            mongo_db.users.replace_one({"_id": str(uid)}, record, upsert=True)
+        except Exception as e:
+            print(Fore.RED + f"🔴 Error saving user {uid} to MongoDB: {e}")
+
+
+
 # =================================
 # 🔍 BROWSER SEARCH (DuckDuckGo Scraper)
 # =================================
@@ -968,6 +992,236 @@ def notify_admin_upgrade_request(token, admin_id, requester_id, requester_name, 
 
 
 # =================================
+# 🎮 GAME & MODERATION GLOBAL STATES & HELPERS
+# =================================
+
+active_ludo_games = {}
+active_blackjacks = {}
+user_message_times = {}
+
+def is_user_group_admin(token, chat_id, user_id, admin_id, user_data):
+    if str(user_id) == str(admin_id):
+        return True
+    user_rec = user_data.get(str(user_id), {})
+    if user_rec.get("role") == "subadmin":
+        return True
+    if chat_id > 0:
+        return True
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{token}/getChatMember", params={"chat_id": chat_id, "user_id": user_id}, timeout=5)
+        if r.status_code == 200:
+            status = r.json().get("result", {}).get("status", "")
+            return status in ["creator", "administrator"]
+    except Exception as e:
+        print(f"Error checking group admin status: {e}")
+    return False
+
+def resolve_target_user(message, args, user_data):
+    if "reply_to_message" in message:
+        tgt_user = message["reply_to_message"]["from"]
+        return str(tgt_user["id"]), tgt_user.get("first_name", "User"), tgt_user.get("username", "")
+    if args:
+        target = args[0].strip()
+        if target.startswith("@"):
+            uname = target[1:].lower()
+            for uid, info in user_data.items():
+                if info.get("username", "").lower() == uname:
+                    return uid, info.get("first_name", "User"), info.get("username", "")
+        elif target.isdigit():
+            uid = target
+            info = user_data.get(uid, {})
+            return uid, info.get("first_name", "User"), info.get("username", "")
+    return None, None, None
+
+def ban_user(token, chat_id, user_id):
+    url = f"https://api.telegram.org/bot{token}/banChatMember"
+    data = {"chat_id": chat_id, "user_id": user_id}
+    try:
+        r = requests.post(url, data=data, timeout=10)
+        return r.status_code == 200
+    except Exception as e:
+        print(f"Error banning user: {e}")
+        return False
+
+def unban_user(token, chat_id, user_id):
+    url = f"https://api.telegram.org/bot{token}/unbanChatMember"
+    data = {"chat_id": chat_id, "user_id": user_id, "only_if_banned": True}
+    try:
+        r = requests.post(url, data=data, timeout=10)
+        return r.status_code == 200
+    except Exception as e:
+        print(f"Error unbanning user: {e}")
+        return False
+
+def kick_user(token, chat_id, user_id):
+    if ban_user(token, chat_id, user_id):
+        time.sleep(0.5)
+        return unban_user(token, chat_id, user_id)
+    return False
+
+def mute_user(token, chat_id, user_id, duration_seconds):
+    url = f"https://api.telegram.org/bot{token}/restrictChatMember"
+    until_date = int(time.time() + duration_seconds)
+    permissions = {"can_send_messages": False}
+    data = {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "permissions": json.dumps(permissions),
+        "until_date": until_date
+    }
+    try:
+        r = requests.post(url, data=data, timeout=10)
+        return r.status_code == 200
+    except Exception as e:
+        print(f"Error muting user: {e}")
+        return False
+
+def unmute_user(token, chat_id, user_id):
+    url = f"https://api.telegram.org/bot{token}/restrictChatMember"
+    permissions = {
+        "can_send_messages": True,
+        "can_send_media_messages": True,
+        "can_send_polls": True,
+        "can_send_other_messages": True,
+        "can_add_web_page_previews": True
+    }
+    data = {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "permissions": json.dumps(permissions)
+    }
+    try:
+        r = requests.post(url, data=data, timeout=10)
+        return r.status_code == 200
+    except Exception as e:
+        print(f"Error unmuting user: {e}")
+        return False
+
+def send_document(token, chat_id, file_name, file_content):
+    url = f"https://api.telegram.org/bot{token}/sendDocument"
+    files = {"document": (file_name, io.BytesIO(file_content.encode("utf-8")))}
+    data = {"chat_id": chat_id}
+    try:
+        r = requests.post(url, data=data, files=files, timeout=15)
+        return r.status_code == 200
+    except Exception as e:
+        print(f"Error sending document: {e}")
+        return False
+
+def get_hand_value(hand):
+    value = 0
+    aces = 0
+    for card in hand:
+        val_str = card.split()[0][:-2] if " " in card else card[:-2]
+        if not val_str:
+            val_str = card[0]
+        if val_str in ["J", "Q", "K"]:
+            value += 10
+        elif val_str == "A":
+            value += 11
+            aces += 1
+        else:
+            try:
+                value += int(val_str)
+            except:
+                value += 10
+    while value > 21 and aces > 0:
+        value -= 10
+        aces -= 1
+    return value
+
+def render_blackjack(game, username, status="playing"):
+    p_hand = game["player_hand"]
+    d_hand = game["dealer_hand"]
+    p_val = get_hand_value(p_hand)
+    d_val = get_hand_value(d_hand)
+    
+    lines = []
+    lines.append("🃏 *MEDUSA BLACKJACK* 🃏")
+    lines.append("--------------------------------")
+    lines.append(f"💵 Bet: `{game['bet']} points`\n")
+    
+    if status == "playing":
+        lines.append(f"🐍 *Medusa (Dealer)* Hand: `[ 🎴 Hidden, {d_hand[1]} ]` (Val: ?)")
+    else:
+        d_cards = ", ".join(d_hand)
+        lines.append(f"🐍 *Medusa (Dealer)* Hand: `[ {d_cards} ]` (Val: `{d_val}`)")
+        
+    p_cards = ", ".join(p_hand)
+    lines.append(f"👤 *{username}* Hand: `[ {p_cards} ]` (Val: `{p_val}`)\n")
+    
+    if status == "playing":
+        lines.append("Choose your move:")
+    elif status == "win":
+        lines.append("🎉 *You Win!* You won double your bet.")
+    elif status == "lose":
+        lines.append("💀 *You Lose!* Medusa took your bet.")
+    elif status == "bust":
+        lines.append("💥 *Busted!* You went over 21.")
+    elif status == "push":
+        lines.append("🤝 *Push!* It's a tie. Bet returned.")
+        
+    return "\n".join(lines)
+
+def render_ludo_board(game):
+    lines = []
+    lines.append("🎲 *LUDO BOARD RACE* 🎲")
+    lines.append("--------------------------------")
+    
+    for p_id in game["players"]:
+        p_name = game["player_names"][p_id]
+        p_pos = game["positions"][p_id]
+        p_color = game["colors"][p_id]
+        lines.append(f"{p_color} *{p_name}*: Step `{p_pos}/30`" + (" (HOME! 🏆)" if p_pos == 30 else ""))
+    
+    lines.append("")
+    
+    def get_step_emoji(step):
+        players_here = []
+        for p_id in game["players"]:
+            if game["positions"][p_id] == step:
+                players_here.append(game["colors"][p_id])
+        
+        if players_here:
+            return "".join(players_here)
+            
+        if step == 0:
+            return "🏠"
+        elif step == 30:
+            return "🏆"
+        elif step in [8, 15, 22]:
+            return "🛡️"
+        elif step == 12:
+            return "🚀"
+        elif step == 25:
+            return "🕸️"
+        else:
+            return "▫️"
+            
+    row1 = " ".join(get_step_emoji(i) for i in range(0, 11))
+    row2 = " ".join(get_step_emoji(i) for i in range(11, 21))
+    row3 = " ".join(get_step_emoji(i) for i in range(21, 31))
+    
+    lines.append(f"🏁 `{row1}`")
+    lines.append(f"   `{row2}`")
+    lines.append(f"👉 `{row3}`")
+    lines.append("")
+    
+    lines.append("`🏠:Start | 🛡️:Safe | 🚀:Boost | 🕸️:Trap | 🏆:Home`")
+    lines.append("--------------------------------")
+    
+    if game.get("last_roll"):
+        lines.append(f"🎲 *{game['last_roller']}* rolled a `{game['last_roll']}`!")
+    
+    active_player_id = game["players"][game["turn_idx"]]
+    active_player_name = game["player_names"][active_player_id]
+    active_player_color = game["colors"][active_player_id]
+    lines.append(f"➡️ Turn: {active_player_color} *{active_player_name}*")
+    
+    return "\n".join(lines)
+
+
+# =================================
 # 📡 TELEGRAM DAEMON MODE
 # =================================
 
@@ -1034,8 +1288,10 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         )
                         continue
 
-                    # Admin-only callbacks from here
-                    if str(sender_id) != str(admin_id):
+                    # Admin and Subadmin callbacks from here
+                    sender_rec = user_data.get(str(sender_id), {})
+                    is_sub = (sender_rec.get("role") == "subadmin")
+                    if str(sender_id) != str(admin_id) and not is_sub:
                         requests.post(
                             f"https://api.telegram.org/bot{token}/answerCallbackQuery",
                             data={"callback_query_id": callback_query["id"], "text": "Access denied!"}
@@ -1206,6 +1462,266 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         )
                         update_admin_panel(token, chat_id, msg_id, admin_id)
 
+                    # -------- BLACKJACK GAMEPLAY CALLBACKS --------
+                    elif callback_data.startswith("bj_hit_") or callback_data.startswith("bj_stand_"):
+                        target_user_id = callback_data.split("_")[-1]
+                        if str(sender_id) != str(target_user_id):
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "This is not your game, mortal! 🚫", "show_alert": True}
+                            )
+                            continue
+                        
+                        game_key = f"{chat_id}_{sender_id}"
+                        if game_key not in active_blackjacks:
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "Game not found! Please start a new game with /blackjack."}
+                            )
+                            requests.post(f"https://api.telegram.org/bot{token}/editMessageReplyMarkup", json={"chat_id": chat_id, "message_id": msg_id, "reply_markup": None})
+                            continue
+                        
+                        game = active_blackjacks[game_key]
+                        user_rec = user_data.get(str(sender_id), {})
+                        
+                        if callback_data.startswith("bj_hit_"):
+                            game["player_hand"].append(game["deck"].pop())
+                            p_val = get_hand_value(game["player_hand"])
+                            
+                            if p_val > 21:
+                                user_rec["points"] = user_rec.get("points", 500) - game["bet"]
+                                save_single_user(str(sender_id), user_rec)
+                                board_text = render_blackjack(game, user_rec.get("first_name", "User"), "bust")
+                                active_blackjacks.pop(game_key)
+                                
+                                requests.post(
+                                    f"https://api.telegram.org/bot{token}/editMessageText",
+                                    data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(board_text), "parse_mode": "HTML", "reply_markup": None}
+                                )
+                            else:
+                                board_text = render_blackjack(game, user_rec.get("first_name", "User"), "playing")
+                                reply_markup = {
+                                    "inline_keyboard": [
+                                        [
+                                            {"text": "🟢 Hit", "callback_data": f"bj_hit_{sender_id}"},
+                                            {"text": "🛑 Stand", "callback_data": f"bj_stand_{sender_id}"}
+                                        ]
+                                    ]
+                                }
+                                requests.post(
+                                    f"https://api.telegram.org/bot{token}/editMessageText",
+                                    data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(board_text), "parse_mode": "HTML", "reply_markup": json.dumps(reply_markup)}
+                                )
+                                
+                        elif callback_data.startswith("bj_stand_"):
+                            d_val = get_hand_value(game["dealer_hand"])
+                            while d_val < 17:
+                                game["dealer_hand"].append(game["deck"].pop())
+                                d_val = get_hand_value(game["dealer_hand"])
+                                
+                            p_val = get_hand_value(game["player_hand"])
+                            
+                            status = "lose"
+                            if d_val > 21:
+                                status = "win"
+                            elif p_val > d_val:
+                                status = "win"
+                            elif p_val < d_val:
+                                status = "lose"
+                            else:
+                                status = "push"
+                                
+                            if status == "win":
+                                user_rec["points"] = user_rec.get("points", 500) + game["bet"]
+                            elif status == "lose":
+                                user_rec["points"] = user_rec.get("points", 500) - game["bet"]
+                            
+                            save_single_user(str(sender_id), user_rec)
+                            board_text = render_blackjack(game, user_rec.get("first_name", "User"), status)
+                            active_blackjacks.pop(game_key)
+                            
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/editMessageText",
+                                data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(board_text), "parse_mode": "HTML", "reply_markup": None}
+                            )
+                        
+                        requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"]})
+                        continue
+
+                    # -------- LUDO GAMEPLAY CALLBACKS --------
+                    elif callback_data.startswith("ludo_join_") or callback_data.startswith("ludo_start_") or callback_data.startswith("ludo_cancel_") or callback_data.startswith("ludo_roll_"):
+                        target_chat_id = int(callback_data.split("_")[-1])
+                        
+                        if target_chat_id not in active_ludo_games:
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "Game lobby not found or has expired! 🚫"}
+                            )
+                            requests.post(f"https://api.telegram.org/bot{token}/editMessageReplyMarkup", json={"chat_id": chat_id, "message_id": msg_id, "reply_markup": None})
+                            continue
+                            
+                        game = active_ludo_games[target_chat_id]
+                        sender_str = str(sender_id)
+                        sender_name = user_data.get(sender_str, {}).get("first_name", "User")
+                        
+                        if "ludo_join_" in callback_data:
+                            if game["status"] != "lobby":
+                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Game is already in progress!"})
+                                continue
+                            if sender_str in game["players"]:
+                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "You already joined!"})
+                                continue
+                            if len(game["players"]) >= 4:
+                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Lobby is full!"})
+                                continue
+                                
+                            game["players"].append(sender_str)
+                            game["player_names"][sender_str] = sender_name
+                            game["positions"][sender_str] = 0
+                            
+                            player_list = "\n".join(f"{idx+1}. *{game['player_names'][p]}*" for idx, p in enumerate(game["players"]))
+                            lobby_text = (
+                                "🎲 *LUDO BOARD RACE - LOBBY* 🎲\n"
+                                "-------------------------------------\n"
+                                f"Host: *{game['player_names'][game['host_id']]}*\n\n"
+                                "👥 *Joined Players*:\n"
+                                f"{player_list}\n\n"
+                                "Click below to join!"
+                            )
+                            reply_markup = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "➕ Join Lobby", "callback_data": f"ludo_join_{target_chat_id}"},
+                                        {"text": "🚀 Start Game", "callback_data": f"ludo_start_{target_chat_id}"}
+                                    ],
+                                    [
+                                        {"text": "❌ Cancel Game", "callback_data": f"ludo_cancel_{target_chat_id}"}
+                                    ]
+                                ]
+                            }
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/editMessageText",
+                                data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(lobby_text), "parse_mode": "HTML", "reply_markup": json.dumps(reply_markup)}
+                            )
+                            requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Joined successfully!"})
+                            
+                        elif "ludo_start_" in callback_data:
+                            if game["status"] != "lobby":
+                                continue
+                            if sender_str != game["host_id"]:
+                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Only the host can start the game! 🚫", "show_alert": True})
+                                continue
+                            if len(game["players"]) < 2:
+                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Need at least 2 players to start! 👥", "show_alert": True})
+                                continue
+                                
+                            colors = ["🔴", "🔵", "🟢", "🟡"]
+                            for idx, p in enumerate(game["players"]):
+                                game["colors"][p] = colors[idx]
+                                game["positions"][p] = 0
+                            
+                            game["status"] = "playing"
+                            game["turn_idx"] = 0
+                            
+                            board_text = render_ludo_board(game)
+                            reply_markup = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "🎲 Roll Dice", "callback_data": f"ludo_roll_{target_chat_id}"}
+                                    ]
+                                ]
+                            }
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/editMessageText",
+                                data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(board_text), "parse_mode": "HTML", "reply_markup": json.dumps(reply_markup)}
+                            )
+                            requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Game started!"})
+                            
+                        elif "ludo_cancel_" in callback_data:
+                            is_admin = is_user_group_admin(token, chat_id, sender_id, admin_id, user_data)
+                            if sender_str != game["host_id"] and not is_admin:
+                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Only host or admins can cancel! 🚫", "show_alert": True})
+                                continue
+                                
+                            active_ludo_games.pop(target_chat_id)
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/editMessageText",
+                                data={"chat_id": chat_id, "message_id": msg_id, "text": "❌ Ludo game lobby cancelled.", "reply_markup": None}
+                            )
+                            requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"]})
+                            
+                        elif "ludo_roll_" in callback_data:
+                            active_player_id = game["players"][game["turn_idx"]]
+                            if sender_str != active_player_id:
+                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "It is not your turn, mortal! 🚫", "show_alert": True})
+                                continue
+                                
+                            import random
+                            roll = random.randint(1, 6)
+                            cur_pos = game["positions"][sender_str]
+                            new_pos = cur_pos + roll
+                            
+                            log_msg = ""
+                            if new_pos > 30:
+                                new_pos = cur_pos
+                            else:
+                                game["positions"][sender_str] = new_pos
+                                
+                                if new_pos not in [0, 8, 15, 22, 30]:
+                                    kicked_players = []
+                                    for other_id in game["players"]:
+                                        if other_id != sender_str and game["positions"][other_id] == new_pos:
+                                            game["positions"][other_id] = 0
+                                            kicked_players.append(game["player_names"][other_id])
+                                    if kicked_players:
+                                        pass
+                                
+                                if new_pos == 12:
+                                    game["positions"][sender_str] = 18
+                                elif new_pos == 25:
+                                    game["positions"][sender_str] = 10
+                                    
+                            game["last_roll"] = roll
+                            game["last_roller"] = sender_name
+                            
+                            if new_pos == 30:
+                                active_ludo_games.pop(target_chat_id)
+                                winner_rec = user_data.get(sender_str, {})
+                                winner_rec["points"] = winner_rec.get("points", 500) + 1000
+                                save_single_user(sender_str, winner_rec)
+                                
+                                win_text = (
+                                    "🏆 *LUDO BOARD RACE - GAME OVER* 🏆\n"
+                                    "-------------------------------------\n"
+                                    f"🎉 *{sender_name}* ({game['colors'][sender_str]}) has reached Home (step 30) and won the game!\n"
+                                    f"Grand prize: `1,000 points`!\n"
+                                    f"New Balance: `{winner_rec['points']} points`"
+                                )
+                                requests.post(
+                                    f"https://api.telegram.org/bot{token}/editMessageText",
+                                    data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(win_text), "parse_mode": "HTML", "reply_markup": None}
+                                )
+                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "You won the game! 🎉"})
+                                continue
+                                
+                            game["turn_idx"] = (game["turn_idx"] + 1) % len(game["players"])
+                            board_text = render_ludo_board(game)
+                            
+                            reply_markup = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "🎲 Roll Dice", "callback_data": f"ludo_roll_{target_chat_id}"}
+                                    ]
+                                ]
+                            }
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/editMessageText",
+                                data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(board_text), "parse_mode": "HTML", "reply_markup": json.dumps(reply_markup)}
+                            )
+                            requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": f"Rolled a {roll}!"})
+                        
+                        continue
+
                     continue
 
                 # =================================
@@ -1235,7 +1751,13 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             "images_today": 0,
                             "summaries_today": 0,
                             "searches_today": 0,
-                            "last_reset_date": current_date_str
+                            "last_reset_date": current_date_str,
+                            "points": 500,
+                            "role": "user",
+                            "inventory": {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0},
+                            "pickaxe": "wooden",
+                            "last_mine_time": 0.0,
+                            "last_daily_claim": 0.0
                         }
                         save_user_data(user_data)
 
@@ -1259,6 +1781,24 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                     if "last_reset_date" not in user_record:
                         user_record["last_reset_date"] = current_date_str
                         modified = True
+                    if "points" not in user_record:
+                        user_record["points"] = 500
+                        modified = True
+                    if "role" not in user_record:
+                        user_record["role"] = "user"
+                        modified = True
+                    if "inventory" not in user_record:
+                        user_record["inventory"] = {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0}
+                        modified = True
+                    if "pickaxe" not in user_record:
+                        user_record["pickaxe"] = "wooden"
+                        modified = True
+                    if "last_mine_time" not in user_record:
+                        user_record["last_mine_time"] = 0.0
+                        modified = True
+                    if "last_daily_claim" not in user_record:
+                        user_record["last_daily_claim"] = 0.0
+                        modified = True
                         
                     # Handle daily reset check
                     if user_record.get("last_reset_date", "") != current_date_str:
@@ -1271,7 +1811,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         
                     if modified:
                         user_data[sender_str] = user_record
-                        save_user_data(user_data)
+                        save_single_user(sender_str, user_record)
 
                     # -------- DOCUMENT MESSAGE --------
                     if "document" in message:
@@ -1463,34 +2003,242 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             send_message(token, chat_id, f"💥 *Error analyzing image*: {e}")
                         continue
 
-                    # -------- EXTRACT TEXT --------
+                    # -------- EXTRACT TEXT & PARSE COMMAND --------
                     text = message.get("text", "").strip()
                     if not text:
                         continue
 
+                    # Parse command if it starts with /
+                    cmd = None
+                    args = []
+                    args_str = ""
+                    if text.startswith("/"):
+                        cmd_match = re.match(r"^/([a-zA-Z0-9_]+)(?:@\w+)?(?:\s+(.*))?$", text, re.IGNORECASE)
+                        if cmd_match:
+                            cmd = cmd_match.group(1).lower()
+                            args_str = cmd_match.group(2) or ""
+                            args = args_str.split()
+
+                    # -------- SPAM DETECTION (Groups Only) --------
+                    if chat_id < 0:
+                        now_ts = time.time()
+                        if chat_id not in user_message_times:
+                            user_message_times[chat_id] = {}
+                        if sender_id not in user_message_times[chat_id]:
+                            user_message_times[chat_id][sender_id] = []
+                        
+                        user_message_times[chat_id][sender_id].append(now_ts)
+                        user_message_times[chat_id][sender_id] = [t for t in user_message_times[chat_id][sender_id] if now_ts - t <= 5]
+                        
+                        if len(user_message_times[chat_id][sender_id]) > 5:
+                            warnings = user_record.get("spam_warnings", 0) + 1
+                            user_record["spam_warnings"] = warnings
+                            save_single_user(sender_str, user_record)
+                            
+                            mention = f"@{username}" if username else first_name
+                            if warnings >= 3:
+                                user_record["spam_warnings"] = 0
+                                save_single_user(sender_str, user_record)
+                                if mute_user(token, chat_id, sender_id, 600):
+                                    send_message(token, chat_id, f"🔇 *Spam Limit Exceeded!* {mention} has been muted for 10 minutes. Please follow group rules.")
+                                else:
+                                    send_message(token, chat_id, f"⚠️ *Spam Limit Exceeded!* Please slow down, {mention} (Failed to mute, make sure I am admin).")
+                            else:
+                                send_message(token, chat_id, f"⚠️ *Spam Warning!* {mention}, slow down. Warning `{warnings}/3`.")
+                            continue
+
+                    # -------- KICK / BAN / UNBAN / MUTE / UNMUTE (Group Moderation) --------
+                    if cmd in ["kick", "ban", "unban", "mute", "unmute"]:
+                        if chat_id >= 0:
+                            send_message(token, chat_id, "⚠️ Moderation commands can only be used in group chats!")
+                            continue
+                            
+                        is_authorized = is_user_group_admin(token, chat_id, sender_id, admin_id, user_data)
+                        if not is_authorized:
+                            send_message(token, chat_id, "🚫 *You are not authorized to use moderation commands.*")
+                            continue
+                            
+                        tgt_id, tgt_name, tgt_username = resolve_target_user(message, args, user_data)
+                        if not tgt_id:
+                            send_message(token, chat_id, f"⚠️ Specify a user to {cmd} (reply to their message or provide `@username`/`user_id`).")
+                            continue
+                            
+                        if tgt_id == sender_str:
+                            send_message(token, chat_id, f"😏 Gifting a {cmd} to yourself? Not happening.")
+                            continue
+                            
+                        if str(tgt_id) == str(admin_id):
+                            send_message(token, chat_id, "⚠️ You cannot moderate the bot owner!")
+                            continue
+                            
+                        success = False
+                        if cmd == "ban":
+                            success = ban_user(token, chat_id, tgt_id)
+                            msg = f"🔨 *{tgt_name}* (@{tgt_username or 'no_username'}) has been banned from the group."
+                        elif cmd == "unban":
+                            success = unban_user(token, chat_id, tgt_id)
+                            msg = f"🔓 *{tgt_name}* (@{tgt_username or 'no_username'}) has been unbanned."
+                        elif cmd == "kick":
+                            success = kick_user(token, chat_id, tgt_id)
+                            msg = f"🥾 *{tgt_name}* (@{tgt_username or 'no_username'}) has been kicked from the group."
+                        elif cmd == "mute":
+                            duration = 600
+                            if len(args) > 1:
+                                try:
+                                    duration = int(args[1]) * 60
+                                    if duration <= 0:
+                                        duration = 600
+                                except:
+                                    pass
+                            success = mute_user(token, chat_id, tgt_id, duration)
+                            msg = f"🔇 *{tgt_name}* (@{tgt_username or 'no_username'}) has been muted for {duration//60} minutes."
+                        elif cmd == "unmute":
+                            success = unmute_user(token, chat_id, tgt_id)
+                            msg = f"🔊 *{tgt_name}* (@{tgt_username or 'no_username'}) has been unmuted."
+                            
+                        if success:
+                            send_message(token, chat_id, msg)
+                        else:
+                            send_message(token, chat_id, f"⚠️ Failed to {cmd} user. Make sure I am an administrator with appropriate privileges.")
+                        continue
+
+                    # -------- SUBADMIN ROLE MANAGEMENT --------
+                    if cmd == "subadmin":
+                        is_owner = (sender_str == str(admin_id))
+                        is_sub = (user_record.get("role") == "subadmin")
+                        
+                        if not is_owner and not is_sub:
+                            send_message(token, chat_id, "🚫 *You are not authorized to use subadmin commands.*")
+                            continue
+                            
+                        if not args:
+                            send_message(
+                                token, chat_id,
+                                "🛠️ *Subadmin Management Panel*\n"
+                                "------------------------------------\n"
+                                "Commands:\n"
+                                "• `/subadmin promote <reply | @username | user_id>` (Owner only)\n"
+                                "• `/subadmin demote <reply | @username | user_id>` (Owner only)\n"
+                                "• `/subadmin list` (Owner & Subadmins)"
+                            )
+                            continue
+                            
+                        sub_action = args[0].lower()
+                        
+                        if sub_action == "list":
+                            subadmins = []
+                            for uid, info in user_data.items():
+                                if info.get("role") == "subadmin":
+                                    subadmins.append(f"• *{info.get('first_name', 'User')}* (@{info.get('username', 'None')}) - ID: `{uid}`")
+                            if subadmins:
+                                send_message(token, chat_id, "👥 *Active Subadmins*:\n" + "\n".join(subadmins))
+                            else:
+                                send_message(token, chat_id, "ℹ️ No subadmins configured yet.")
+                            continue
+                            
+                        if not is_owner:
+                            send_message(token, chat_id, "🚫 *Only the main owner can promote or demote subadmins.*")
+                            continue
+                            
+                        if len(args) < 2:
+                            send_message(token, chat_id, f"⚠️ Usage: `/subadmin {sub_action} <reply | @username | user_id>`")
+                            continue
+                            
+                        target_args = args[1:]
+                        tgt_id, tgt_name, tgt_username = resolve_target_user(message, target_args, user_data)
+                        
+                        if not tgt_id:
+                            send_message(token, chat_id, "⚠️ Target user not found in database.")
+                            continue
+                            
+                        tgt_rec = user_data.get(tgt_id)
+                        if sub_action == "promote":
+                            if tgt_rec.get("role") == "subadmin":
+                                send_message(token, chat_id, f"⚠️ *{tgt_name}* is already a subadmin.")
+                                continue
+                            tgt_rec["role"] = "subadmin"
+                            save_single_user(tgt_id, tgt_rec)
+                            send_message(token, chat_id, f"🎉 *{tgt_name}* promoted to *Subadmin*! They can now access the admin panel.")
+                        elif sub_action == "demote":
+                            if tgt_rec.get("role") != "subadmin":
+                                send_message(token, chat_id, f"⚠️ *{tgt_name}* is not a subadmin.")
+                                continue
+                            tgt_rec["role"] = "user"
+                            save_single_user(tgt_id, tgt_rec)
+                            send_message(token, chat_id, f"📉 *{tgt_name}* demoted to regular User.")
+                        else:
+                            send_message(token, chat_id, "⚠️ Unknown subadmin action.")
+                        continue
+
+                    # -------- EXPORT DATA --------
+                    if cmd == "export":
+                        is_owner = (sender_str == str(admin_id))
+                        is_sub = (user_record.get("role") == "subadmin")
+                        if not is_owner and not is_sub:
+                            send_message(token, chat_id, "🚫 *You are not authorized to export user data.*")
+                            continue
+                            
+                        if not args:
+                            send_message(token, chat_id, "⚠️ Usage: `/export <reply | @username | user_id>`")
+                            continue
+                            
+                        tgt_id, tgt_name, tgt_username = resolve_target_user(message, args, user_data)
+                        if not tgt_id:
+                            send_message(token, chat_id, "⚠️ Target user not found.")
+                            continue
+                            
+                        tgt_record = user_data.get(tgt_id)
+                        formatted_json = json.dumps(tgt_record, indent=4, ensure_ascii=False)
+                        file_name = f"user_history_{tgt_id}.json"
+                        
+                        if send_document(token, chat_id, file_name, formatted_json):
+                            send_message(token, chat_id, f"✅ Data history for *{tgt_name}* ({tgt_id}) exported successfully!")
+                        else:
+                            send_message(token, chat_id, "💥 Failed to export and send data document.")
+                        continue
+
                     # -------- HELP --------
-                    if text == "/help":
+                    if cmd == "help":
                         commands = (
                             "🐍 *Medusa Bot Commands*:\n"
                             "• `/start` - Wake up the bot\n"
                             "• `/help` - Show this help menu\n"
-                            "• `/default` - Switch to Default Mode (Free, Unlimited) 🔓\n"
-                            "• `/medusa` - Switch to Premium Mode (Premium, 4 queries/day) 🌟\n"
-                            "• `/check` - Check current mode and remaining credits 📊\n"
+                            "• `/default` - Switch to Default Mode 🔓\n"
+                            "• `/medusa` - Switch to Premium Mode 🌟\n"
+                            "• `/check` - Check mode and limits 📊\n"
                             "• `/clear` - Reset your conversation history 🧹\n"
                             "• `/search` - Toggle automatic web search mode 🔍\n"
-                            "• `/search <query>` - Run a direct web search query 🔍\n"
-                            "• `/mood <normal|angry>` - Adjust Medusa's mood 🎭\n"
-                            "• `/temp <0.1-1.0>` - Adjust creativity temperature 🌡️\n"
+                            "• `/mood <normal|angry>` - Adjust mood 🎭\n"
+                            "• `/temp <0.1-1.0>` - Adjust creativity 🌡️\n\n"
+                            "🎮 *Games & Economy*:\n"
+                            "• `/balance` - Check point balance 💰\n"
+                            "• `/daily` - Claim daily point reward 🎁\n"
+                            "• `/gift <user> <amount>` - Transfer points 🎁\n"
+                            "• `/leaderboard` - See richest users 🏆\n"
+                            "• `/guide` - View full games guidebook 📖\n"
+                            "• `/mine` - Go mining for ores ⛏️\n"
+                            "• `/inventory` - View mined ores 🎒\n"
+                            "• `/shop` - Upgrade mining pickaxe 🛒\n"
+                            "• `/buy <type>` - Buy upgrade ⛏️\n"
+                            "• `/sellall` - Sell all ores for points 💰\n"
+                            "• `/slots <bet>` - Play slot machine 🎰\n"
+                            "• `/coinflip <bet> <side>` - Flip coin 🪙\n"
+                            "• `/roulette <bet> <prediction>` - Spin roulette 🎡\n"
+                            "• `/blackjack <bet>` - Play blackjack 🃏\n"
+                            "• `/ludo` - Create Ludo board race lobby 🎲"
                         )
-                        if sender_str == str(admin_id):
-                            commands += "• `/admin` - Access Admin Dashboard 👑\n"
+                        is_sub = (user_record.get("role") == "subadmin")
+                        if sender_str == str(admin_id) or is_sub:
+                            commands += "\n\n👑 *Admin/Subadmin Commands*:\n"
+                            commands += "• `/admin` - Access Admin Dashboard\n"
+                            commands += "• `/subadmin` - Promote/demote/list subadmins\n"
+                            commands += "• `/export <user>` - Export target user database profile\n"
+                            commands += "• Moderation: `/kick`, `/ban`, `/unban`, `/mute [mins]`, `/unmute`"
                         send_message(token, chat_id, commands)
                         continue
 
                     # -------- START --------
-                    if text == "/start":
-                        # Step 1 — Show typing indicator then send "Starting..."
+                    if cmd == "start":
                         send_typing(token, chat_id)
                         time.sleep(0.5)
                         boot_resp = requests.post(
@@ -1504,7 +2252,6 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         except Exception:
                             pass
 
-                        # Step 2 — Pause then show typing again, edit to wake message
                         time.sleep(1.2)
                         send_typing(token, chat_id)
                         time.sleep(1.0)
@@ -1530,15 +2277,13 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         else:
                             send_message(token, chat_id, wake_text)
 
-                        # Step 3 — Short pause then send info card
                         time.sleep(1.0)
                         send_typing(token, chat_id)
 
-                        # Step 4 — Build and send user info card
                         display_username = f"@{username}" if username else "No username set"
                         mode_display = "Default (Free, Unlimited)" if active_mode == "groq" else "Premium"
                         is_unltd = user_record.get("unlimited", False) or (sender_str == str(admin_id))
-                        credit_info = "Unlimited ♾️" if is_unltd else "4 questions/day (Premium Mode)"
+                        credit_info = "Unlimited ♾️" if is_unltd else f"{PLAN_LIMITS.get(user_record.get('plan', 'free'), PLAN_LIMITS['free'])['medusa_credits']} questions/day"
 
                         info_card = (
                             "\U0001f40d *Medusa \u2014 User Profile*\n\n"
@@ -1546,23 +2291,707 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             f"\U0001f4e7 *Username:* {display_username}\n"
                             f"\U0001f194 *Chat ID:* `{chat_id}`\n"
                             f"\U0001f4ca *Active Mode:* {mode_display}\n"
-                            f"\U0001f4b3 *Credits:* {credit_info}\n\n"
-                            "You are in *Default Mode* with unlimited free questions \U0001f513\n\n"
-                            "\u2022 /medusa \u2014 Switch to Premium Mode \U0001f31f\n"
-                            "\u2022 /upgrade \u2014 Unlock Unlimited for $2 \U0001f680\n"
-                            "\u2022 /help \u2014 View all commands \u2139\ufe0f"
+                            f"\U0001f4b3 *Credits:* {credit_info}\n"
+                            f"💰 *Wallet:* `{user_record.get('points', 500)} points`\n\n"
+                            "Use `/help` to see all active commands, mortal. Enjoy the games!"
                         )
 
                         send_message(token, chat_id, info_card)
                         continue
 
+                    # -------- POINTS & BALANCE --------
+                    if cmd in ["balance", "bal", "wallet"]:
+                        pts = user_record.get("points", 500)
+                        send_message(token, chat_id, f"💰 *{first_name}'s Balance*:\nYou have `{pts} points`.")
+                        continue
+
+                    # -------- DAILY CLAIM --------
+                    if cmd == "daily":
+                        now = time.time()
+                        last_daily = user_record.get("last_daily_claim", 0.0)
+                        cooldown = 86400
+                        if now - last_daily < cooldown:
+                            remaining = cooldown - (now - last_daily)
+                            hours = int(remaining // 3600)
+                            minutes = int((remaining % 3600) // 60)
+                            send_message(token, chat_id, f"⏳ You have already claimed your daily points, mortal! Come back in `{hours}h {minutes}m`.")
+                        else:
+                            reward = 200
+                            user_record["points"] = user_record.get("points", 500) + reward
+                            user_record["last_daily_claim"] = now
+                            save_single_user(sender_str, user_record)
+                            send_message(token, chat_id, f"🎉 *Daily Claim Successful!*\nMedusa has granted you `{reward} points`! Current balance: `{user_record['points']} points`.")
+                        continue
+
+                    # -------- GIFT POINTS --------
+                    if cmd in ["gift", "transfer"]:
+                        if len(args) < 2:
+                            send_message(token, chat_id, "⚠️ Usage: `/gift <reply | @username | user_id> <amount>`")
+                            continue
+                        try:
+                            amount = int(args[-1])
+                            if amount <= 0:
+                                raise ValueError
+                        except:
+                            send_message(token, chat_id, "⚠️ Please specify a valid positive amount of points to gift.")
+                            continue
+                        
+                        target_args = args[:-1]
+                        tgt_id, tgt_name, tgt_username = resolve_target_user(message, target_args, user_data)
+                        if not tgt_id:
+                            send_message(token, chat_id, "⚠️ Target user not found. Reply to their message or specify `@username` / `user_id`.")
+                            continue
+                        
+                        if tgt_id == sender_str:
+                            send_message(token, chat_id, "😏 Gifting points to yourself? Medusa is not amused.")
+                            continue
+                        
+                        my_pts = user_record.get("points", 500)
+                        if my_pts < amount:
+                            send_message(token, chat_id, f"⚠️ You do not have enough points. Balance: `{my_pts} points`.")
+                            continue
+                        
+                        tgt_record = user_data.get(tgt_id)
+                        if not tgt_record:
+                            tgt_record = {
+                                "credits_used": 0,
+                                "last_reset": time.time(),
+                                "username": tgt_username,
+                                "first_name": tgt_name,
+                                "active_mode": "groq",
+                                "preferences": {},
+                                "history": [],
+                                "plan": "free",
+                                "images_today": 0,
+                                "summaries_today": 0,
+                                "searches_today": 0,
+                                "last_reset_date": datetime.now().strftime("%Y-%m-%d"),
+                                "points": 500,
+                                "role": "user",
+                                "inventory": {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0},
+                                "pickaxe": "wooden",
+                                "last_mine_time": 0.0,
+                                "last_daily_claim": 0.0
+                            }
+                        
+                        user_record["points"] = my_pts - amount
+                        tgt_record["points"] = tgt_record.get("points", 500) + amount
+                        
+                        save_single_user(sender_str, user_record)
+                        save_single_user(tgt_id, tgt_record)
+                        
+                        send_message(token, chat_id, f"🎁 *Gift Successful!*\nYou gifted `{amount} points` to *{tgt_name}* (@{tgt_username or 'no_username'}).")
+                        continue
+
+                    # -------- LEADERBOARD --------
+                    if cmd in ["leaderboard", "rich"]:
+                        sorted_users = sorted(user_data.items(), key=lambda x: x[1].get("points", 500), reverse=True)
+                        lines = ["🏆 *MEDUSA POINTS LEADERBOARD* 🏆", "--------------------------------------"]
+                        for idx, (uid, info) in enumerate(sorted_users[:10], 1):
+                            name = info.get("first_name", "User")
+                            pts = info.get("points", 500)
+                            lines.append(f"{idx}. *{name}* — `{pts} pts`")
+                        send_message(token, chat_id, "\n".join(lines))
+                        continue
+
+                    # -------- GUIDE --------
+                    if cmd in ["guide", "games"]:
+                        guide = (
+                            "📖 *MEDUSA GAME GUIDEBOOK* 🐍\n"
+                            "------------------------------------\n"
+                            "Welcome to Medusa's Entertainment and Earning Hub! Play games, earn points, and climb the leaderboard.\n\n"
+                            "💰 *POINTS & ECONOMY*\n"
+                            "Every user starts with *500 points*.\n"
+                            "• `/balance` - Check your wallet.\n"
+                            "• `/daily` - Claim daily rewards (200 pts, 24h cooldown).\n"
+                            "• `/gift <user> <amount>` - Transfer points to friends.\n"
+                            "• `/leaderboard` - See who is the richest.\n\n"
+                            "⛏️ *MINING GAME*\n"
+                            "Mine resources and sell them for profit!\n"
+                            "• `/mine` - Mine for ores. Cooldown depends on your pickaxe.\n"
+                            "• `/inventory` - Check your pickaxe and mined ores.\n"
+                            "• `/shop` - View pickaxe upgrades.\n"
+                            "• `/buy <pickaxe_name>` - Purchase a better pickaxe.\n"
+                            "• `/sellall` - Sell all your ores for points.\n\n"
+                            "🎰 *CASINO GAMES*\n"
+                            "Bet your points and multiply your wealth!\n"
+                            "• `/slots <bet>` - Play the slot machine.\n"
+                            "• `/coinflip <bet> <heads/tails>` - Flip a coin.\n"
+                            "• `/roulette <bet> <red/black/green/number>` - Classic roulette.\n"
+                            "• `/blackjack <bet>` - Play Blackjack against Medusa.\n\n"
+                            "🎲 *LUDO BOARD RACE*\n"
+                            "Compete with other players in a race to the finish!\n"
+                            "• `/ludo` - Create a Ludo lobby.\n"
+                            "• `/ludo start` - Start the game.\n"
+                            "• Roll the dice to move. If you land on another player, they are kicked back to start! Reach step 30 exactly to win and claim *1,000 points*!"
+                        )
+                        send_message(token, chat_id, guide)
+                        continue
+
+                    # -------- MINE ORES --------
+                    if cmd == "mine":
+                        now = time.time()
+                        last_mine = user_record.get("last_mine_time", 0.0)
+                        pickaxe = user_record.get("pickaxe", "wooden")
+                        
+                        stats = {
+                            "wooden": {"cooldown": 60, "min_y": 5, "max_y": 15},
+                            "stone": {"cooldown": 45, "min_y": 10, "max_y": 30},
+                            "iron": {"cooldown": 30, "min_y": 20, "max_y": 60},
+                            "diamond": {"cooldown": 15, "min_y": 50, "max_y": 150},
+                            "netherite": {"cooldown": 10, "min_y": 100, "max_y": 300}
+                        }
+                        
+                        p_stats = stats.get(pickaxe, stats["wooden"])
+                        cd = p_stats["cooldown"]
+                        
+                        if now - last_mine < cd:
+                            remaining = cd - (now - last_mine)
+                            send_message(token, chat_id, f"⏳ Your arm is tired, miner! Cooldown remaining: `{remaining:.1f}s`.")
+                            continue
+                        
+                        import random
+                        total_units = random.randint(p_stats["min_y"], p_stats["max_y"])
+                        
+                        mined = {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0}
+                        for _ in range(total_units):
+                            roll = random.random()
+                            if roll < 0.50:
+                                mined["coal"] += 1
+                            elif roll < 0.80:
+                                mined["iron"] += 1
+                            elif roll < 0.94:
+                                mined["gold"] += 1
+                            elif roll < 0.99:
+                                mined["diamond"] += 1
+                            else:
+                                mined["medusite"] += 1
+                                
+                        inv = user_record.get("inventory", {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0})
+                        for ore, qty in mined.items():
+                            inv[ore] = inv.get(ore, 0) + qty
+                        
+                        user_record["inventory"] = inv
+                        user_record["last_mine_time"] = now
+                        save_single_user(sender_str, user_record)
+                        
+                        lines = [f"⛏️ *You went mining with your {pickaxe.capitalize()} Pickaxe!*", "--------------------------------------"]
+                        ore_emojis = {"coal": "⚫ Coal", "iron": "⚙️ Iron", "gold": "🟡 Gold", "diamond": "💎 Diamond", "medusite": "🐍 Medusite"}
+                        found = False
+                        for ore, qty in mined.items():
+                            if qty > 0:
+                                lines.append(f"• Found {qty}x {ore_emojis[ore]}")
+                                found = True
+                        if not found:
+                            lines.append("You found nothing but dirt! 🪨")
+                        
+                        send_message(token, chat_id, "\n".join(lines))
+                        continue
+
+                    # -------- INVENTORY --------
+                    if cmd in ["inventory", "bag"]:
+                        inv = user_record.get("inventory", {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0})
+                        pickaxe = user_record.get("pickaxe", "wooden")
+                        
+                        lines = [f"🎒 *{first_name}'s Inventory*:", f"• Tool: `{pickaxe.capitalize()} Pickaxe` ⛏️", "--------------------------------------"]
+                        ore_emojis = {"coal": "⚫ Coal", "iron": "⚙️ Iron", "gold": "🟡 Gold", "diamond": "💎 Diamond", "medusite": "🐍 Medusite"}
+                        for ore, qty in inv.items():
+                            lines.append(f"• {ore_emojis[ore]}: `{qty}`")
+                        
+                        lines.append("\nUse `/sellall` to sell everything.")
+                        send_message(token, chat_id, "\n".join(lines))
+                        continue
+
+                    # -------- SHOP --------
+                    if cmd == "shop":
+                        shop_msg = (
+                            "🛒 *MEDUSA PICKAXE SHOP* ⛏️\n"
+                            "Upgrade your tool to mine faster and get richer yields!\n"
+                            "--------------------------------------\n"
+                            "1. *Stone Pickaxe* 🪨\n"
+                            "   • Price: `500 points`\n"
+                            "   • Cooldown: `45s` | Yield: `10-30`\n\n"
+                            "2. *Iron Pickaxe* ⚙️\n"
+                            "   • Price: `1,500 points`\n"
+                            "   • Cooldown: `30s` | Yield: `20-60`\n\n"
+                            "3. *Diamond Pickaxe* 💎\n"
+                            "   • Price: `5,000 points`\n"
+                            "   • Cooldown: `15s` | Yield: `50-150`\n\n"
+                            "4. *Netherite Pickaxe* 🔥\n"
+                            "   • Price: `15,000 points`\n"
+                            "   • Cooldown: `10s` | Yield: `100-300`\n\n"
+                            "Use `/buy <stone|iron|diamond|netherite>` to purchase!"
+                        )
+                        send_message(token, chat_id, shop_msg)
+                        continue
+
+                    # -------- BUY UPGRADE --------
+                    if cmd == "buy":
+                        if not args:
+                            send_message(token, chat_id, "⚠️ Usage: `/buy <stone|iron|diamond|netherite>`")
+                            continue
+                        
+                        tool = args[0].lower()
+                        prices = {
+                            "stone": 500,
+                            "iron": 1500,
+                            "diamond": 5000,
+                            "netherite": 15000
+                        }
+                        
+                        if tool not in prices:
+                            send_message(token, chat_id, "⚠️ Unknown item. Choose from: `stone`, `iron`, `diamond`, `netherite`.")
+                            continue
+                        
+                        current_tool = user_record.get("pickaxe", "wooden")
+                        if current_tool == tool:
+                            send_message(token, chat_id, f"⚠️ You already own the {tool.capitalize()} Pickaxe!")
+                            continue
+                        
+                        levels = {"wooden": 0, "stone": 1, "iron": 2, "diamond": 3, "netherite": 4}
+                        if levels.get(current_tool, 0) > levels.get(tool, 0):
+                            send_message(token, chat_id, "😏 Medusa will not let you downgrade your tools.")
+                            continue
+                            
+                        price = prices[tool]
+                        my_pts = user_record.get("points", 500)
+                        if my_pts < price:
+                            send_message(token, chat_id, f"⚠️ You do not have enough points. Cost: `{price} pts` | Balance: `{my_pts} pts`.")
+                            continue
+                            
+                        user_record["points"] = my_pts - price
+                        user_record["pickaxe"] = tool
+                        save_single_user(sender_str, user_record)
+                        
+                        send_message(token, chat_id, f"🎉 *Purchase Successful!*\nYou upgraded to a *{tool.capitalize()} Pickaxe*! Balance: `{user_record['points']} points`.")
+                        continue
+
+                    # -------- SELL ORES --------
+                    if cmd == "sellall":
+                        inv = user_record.get("inventory", {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0})
+                        prices = {"coal": 2, "iron": 5, "gold": 15, "diamond": 50, "medusite": 200}
+                        
+                        total_earned = 0
+                        items_sold = 0
+                        for ore, qty in inv.items():
+                            if qty > 0:
+                                total_earned += qty * prices.get(ore, 0)
+                                items_sold += qty
+                                inv[ore] = 0
+                                
+                        if total_earned == 0:
+                            send_message(token, chat_id, "⚠️ Your inventory is empty! Go mine first using `/mine`.")
+                            continue
+                            
+                        user_record["inventory"] = inv
+                        user_record["points"] = user_record.get("points", 500) + total_earned
+                        save_single_user(sender_str, user_record)
+                        
+                        send_message(token, chat_id, f"💰 *Sales Receipt:*\nSold `{items_sold}` ores for a total of `{total_earned} points`!\nNew balance: `{user_record['points']} points`.")
+                        continue
+
+                    # -------- SLOTS --------
+                    if cmd == "slots":
+                        if not args:
+                            send_message(token, chat_id, "⚠️ Usage: `/slots <bet>`")
+                            continue
+                        try:
+                            bet = int(args[0])
+                            if bet <= 0:
+                                raise ValueError
+                        except:
+                            send_message(token, chat_id, "⚠️ Please specify a valid positive bet amount.")
+                            continue
+                            
+                        my_pts = user_record.get("points", 500)
+                        if my_pts < bet:
+                            send_message(token, chat_id, f"⚠️ You do not have enough points to bet. Balance: `{my_pts} pts`.")
+                            continue
+                            
+                        import random
+                        emojis = ["🍒", "🍋", "🍇", "💎", "🎰", "7️⃣"]
+                        row = [random.choice(emojis) for _ in range(3)]
+                        
+                        match_count = len(set(row))
+                        won = False
+                        multiplier = 0
+                        
+                        if match_count == 1:
+                            won = True
+                            target = row[0]
+                            multipliers = {"🍒": 15, "🍋": 8, "🍇": 10, "💎": 20, "🎰": 30, "7️⃣": 50}
+                            multiplier = multipliers.get(target, 5)
+                        elif match_count == 2:
+                            won = True
+                            multiplier = 2
+                            
+                        if won:
+                            winnings = bet * multiplier
+                            user_record["points"] = my_pts - bet + winnings
+                            result_text = f"🎉 *Match!* You won `{winnings} points`! ({multiplier}x)"
+                        else:
+                            user_record["points"] = my_pts - bet
+                            result_text = "💀 *Lose!* Better luck next time."
+                            
+                        save_single_user(sender_str, user_record)
+                        
+                        slots_display = (
+                            "🎰 *SLOT MACHINE* 🎰\n"
+                            "---------------------\n"
+                            f"| {row[0]} | {row[1]} | {row[2]} |\n"
+                            "---------------------\n"
+                            f"{result_text}\n"
+                            f"Wallet: `{user_record['points']} points`"
+                        )
+                        send_message(token, chat_id, slots_display)
+                        continue
+
+                    # -------- COINFLIP --------
+                    if cmd in ["coinflip", "cf"]:
+                        if len(args) < 2:
+                            send_message(token, chat_id, "⚠️ Usage: `/coinflip <bet> <heads|tails>`")
+                            continue
+                        try:
+                            bet = int(args[0])
+                            if bet <= 0:
+                                raise ValueError
+                        except:
+                            send_message(token, chat_id, "⚠️ Please specify a valid positive bet amount.")
+                            continue
+                            
+                        guess = args[1].lower()
+                        if guess not in ["heads", "tails", "h", "t"]:
+                            send_message(token, chat_id, "⚠️ Choose either `heads` or `tails`.")
+                            continue
+                        if guess == "h": guess = "heads"
+                        if guess == "t": guess = "tails"
+                        
+                        my_pts = user_record.get("points", 500)
+                        if my_pts < bet:
+                            send_message(token, chat_id, f"⚠️ You do not have enough points. Balance: `{my_pts} pts`.")
+                            continue
+                            
+                        import random
+                        outcome = random.choice(["heads", "tails"])
+                        coin_emoji = "🪙 (Heads)" if outcome == "heads" else "🪙 (Tails)"
+                        
+                        if guess == outcome:
+                            user_record["points"] = my_pts + bet
+                            result = f"🎉 *You Won!* The coin landed on {coin_emoji}. You gained `{bet} points`."
+                        else:
+                            user_record["points"] = my_pts - bet
+                            result = f"💀 *You Lost!* The coin landed on {coin_emoji}. You lost `{bet} points`."
+                            
+                        save_single_user(sender_str, user_record)
+                        send_message(token, chat_id, f"{result}\nBalance: `{user_record['points']} points`")
+                        continue
+
+                    # -------- ROULETTE --------
+                    if cmd == "roulette":
+                        if len(args) < 2:
+                            send_message(token, chat_id, "⚠️ Usage: `/roulette <bet> <red|black|green|number(0-36)>`")
+                            continue
+                        try:
+                            bet = int(args[0])
+                            if bet <= 0:
+                                raise ValueError
+                        except:
+                            send_message(token, chat_id, "⚠️ Please specify a valid positive bet amount.")
+                            continue
+                            
+                        prediction = args[1].lower()
+                        is_number = prediction.isdigit() and (0 <= int(prediction) <= 36)
+                        is_color = prediction in ["red", "black", "green"]
+                        
+                        if not is_number and not is_color:
+                            send_message(token, chat_id, "⚠️ Predict either `red`, `black`, `green`, or a specific number between `0` and `36`.")
+                            continue
+                            
+                        my_pts = user_record.get("points", 500)
+                        if my_pts < bet:
+                            send_message(token, chat_id, f"⚠️ You do not have enough points. Balance: `{my_pts} pts`.")
+                            continue
+                            
+                        import random
+                        roll = random.randint(0, 36)
+                        
+                        red_numbers = [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36]
+                        if roll == 0:
+                            roll_color = "green"
+                        elif roll in red_numbers:
+                            roll_color = "red"
+                        else:
+                            roll_color = "black"
+                            
+                        won = False
+                        payout = 0
+                        if is_color:
+                            if prediction == roll_color:
+                                won = True
+                                payout = bet * 35 if roll_color == "green" else bet * 2
+                        elif is_number:
+                            if int(prediction) == roll:
+                                won = True
+                                payout = bet * 35
+                                
+                        color_emoji = "🔴" if roll_color == "red" else ("⚫" if roll_color == "black" else "🟢")
+                        roll_desc = f"{color_emoji} *{roll} {roll_color.upper()}*"
+                        
+                        if won:
+                            user_record["points"] = my_pts - bet + payout
+                            result = f"🎉 *Winner!* Roulette rolled {roll_desc}. You won `{payout} points`!"
+                        else:
+                            user_record["points"] = my_pts - bet
+                            result = f"💀 *Loser!* Roulette rolled {roll_desc}. You lost `{bet} points`."
+                            
+                        save_single_user(sender_str, user_record)
+                        send_message(token, chat_id, f"{result}\nBalance: `{user_record['points']} points`")
+                        continue
+
+                    # -------- BLACKJACK --------
+                    if cmd in ["blackjack", "bj"]:
+                        if not args:
+                            send_message(token, chat_id, "⚠️ Usage: `/blackjack <bet>`")
+                            continue
+                        try:
+                            bet = int(args[0])
+                            if bet <= 0:
+                                raise ValueError
+                        except:
+                            send_message(token, chat_id, "⚠️ Please specify a valid positive bet amount.")
+                            continue
+                            
+                        my_pts = user_record.get("points", 500)
+                        if my_pts < bet:
+                            send_message(token, chat_id, f"⚠️ You do not have enough points. Balance: `{my_pts} pts`.")
+                            continue
+                            
+                        game_key = f"{chat_id}_{sender_id}"
+                        if game_key in active_blackjacks:
+                            send_message(token, chat_id, "⚠️ You already have an active Blackjack game in progress!")
+                            continue
+                            
+                        import random
+                        suits = ["❤️", "♦️", "♣️", "♠️"]
+                        ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
+                        deck = [f"{r}{s}" for r in ranks for s in suits]
+                        random.shuffle(deck)
+                        
+                        p_hand = [deck.pop(), deck.pop()]
+                        d_hand = [deck.pop(), deck.pop()]
+                        
+                        active_blackjacks[game_key] = {
+                            "bet": bet,
+                            "deck": deck,
+                            "player_hand": p_hand,
+                            "dealer_hand": d_hand,
+                            "msg_id": None
+                        }
+                        
+                        game_text = render_blackjack(active_blackjacks[game_key], first_name, "playing")
+                        reply_markup = {
+                            "inline_keyboard": [
+                                [
+                                    {"text": "🟢 Hit", "callback_data": f"bj_hit_{sender_id}"},
+                                    {"text": "🛑 Stand", "callback_data": f"bj_stand_{sender_id}"}
+                                ]
+                            ]
+                        }
+                        
+                        url = f"https://api.telegram.org/bot{token}/sendMessage"
+                        data = {
+                            "chat_id": chat_id,
+                            "text": markdown_to_html(game_text),
+                            "parse_mode": "HTML",
+                            "reply_markup": json.dumps(reply_markup)
+                        }
+                        try:
+                            r = requests.post(url, data=data, timeout=10).json()
+                            msg_id = r.get("result", {}).get("message_id")
+                            active_blackjacks[game_key]["msg_id"] = msg_id
+                        except Exception as e:
+                            print(f"Error starting blackjack message: {e}")
+                            active_blackjacks.pop(game_key, None)
+                        continue
+
+                    # -------- LUDO --------
+                    if cmd == "ludo":
+                        ludo_cmd = args[0].lower() if args else "create"
+                        
+                        if ludo_cmd == "create":
+                            if chat_id in active_ludo_games:
+                                send_message(token, chat_id, "⚠️ A Ludo game lobby or active match is already running in this chat.")
+                                continue
+                            
+                            active_ludo_games[chat_id] = {
+                                "status": "lobby",
+                                "players": [sender_str],
+                                "player_names": {sender_str: first_name},
+                                "positions": {sender_str: 0},
+                                "colors": {},
+                                "turn_idx": 0,
+                                "last_roll": 0,
+                                "last_roller": None,
+                                "host_id": sender_str,
+                                "lobby_msg_id": None
+                            }
+                            
+                            lobby_text = (
+                                "🎲 *LUDO BOARD RACE - NEW LOBBY* 🎲\n"
+                                "-------------------------------------\n"
+                                f"Host: *{first_name}*\n\n"
+                                "👥 *Joined Players*:\n"
+                                f"1. *{first_name}*\n\n"
+                                "Waiting for players to join (2 to 4 players required). Click below to join!"
+                            )
+                            
+                            reply_markup = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "➕ Join Lobby", "callback_data": f"ludo_join_{chat_id}"},
+                                        {"text": "🚀 Start Game", "callback_data": f"ludo_start_{chat_id}"}
+                                    ],
+                                    [
+                                        {"text": "❌ Cancel Game", "callback_data": f"ludo_cancel_{chat_id}"}
+                                    ]
+                                ]
+                            }
+                            
+                            url = f"https://api.telegram.org/bot{token}/sendMessage"
+                            data = {
+                                "chat_id": chat_id,
+                                "text": markdown_to_html(lobby_text),
+                                "parse_mode": "HTML",
+                                "reply_markup": json.dumps(reply_markup)
+                            }
+                            try:
+                                r = requests.post(url, data=data, timeout=10).json()
+                                lobby_msg_id = r.get("result", {}).get("message_id")
+                                active_ludo_games[chat_id]["lobby_msg_id"] = lobby_msg_id
+                            except Exception as e:
+                                print(f"Error starting ludo lobby: {e}")
+                                active_ludo_games.pop(chat_id, None)
+                                
+                        elif ludo_cmd == "join":
+                            if chat_id not in active_ludo_games:
+                                send_message(token, chat_id, "⚠️ No active Ludo lobby found in this chat. Start one with `/ludo`!")
+                                continue
+                            
+                            game = active_ludo_games[chat_id]
+                            if game["status"] != "lobby":
+                                send_message(token, chat_id, "⚠️ Game is already running!")
+                                continue
+                            
+                            if sender_str in game["players"]:
+                                send_message(token, chat_id, "⚠️ You have already joined this lobby!")
+                                continue
+                                
+                            if len(game["players"]) >= 4:
+                                send_message(token, chat_id, "⚠️ Lobby is full (max 4 players)!")
+                                continue
+                                
+                            game["players"].append(sender_str)
+                            game["player_names"][sender_str] = first_name
+                            game["positions"][sender_str] = 0
+                            
+                            player_list = "\n".join(f"{idx+1}. *{game['player_names'][p]}*" for idx, p in enumerate(game["players"]))
+                            lobby_text = (
+                                "🎲 *LUDO BOARD RACE - LOBBY* 🎲\n"
+                                "-------------------------------------\n"
+                                f"Host: *{game['player_names'][game['host_id']]}*\n\n"
+                                "👥 *Joined Players*:\n"
+                                f"{player_list}\n\n"
+                                "Click below to join!"
+                            )
+                            
+                            reply_markup = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "➕ Join Lobby", "callback_data": f"ludo_join_{chat_id}"},
+                                        {"text": "🚀 Start Game", "callback_data": f"ludo_start_{chat_id}"}
+                                    ],
+                                    [
+                                        {"text": "❌ Cancel Game", "callback_data": f"ludo_cancel_{chat_id}"}
+                                    ]
+                                ]
+                            }
+                            
+                            url = f"https://api.telegram.org/bot{token}/editMessageText"
+                            data = {
+                                "chat_id": chat_id,
+                                "message_id": game["lobby_msg_id"],
+                                "text": markdown_to_html(lobby_text),
+                                "parse_mode": "HTML",
+                                "reply_markup": json.dumps(reply_markup)
+                            }
+                            try:
+                                requests.post(url, data=data, timeout=10)
+                            except:
+                                pass
+                                
+                        elif ludo_cmd == "start":
+                            if chat_id not in active_ludo_games:
+                                send_message(token, chat_id, "⚠️ No Ludo lobby to start. Create one with `/ludo`!")
+                                continue
+                            game = active_ludo_games[chat_id]
+                            if game["status"] != "lobby":
+                                continue
+                            if sender_str != game["host_id"]:
+                                send_message(token, chat_id, "⚠️ Only the host can start the game.")
+                                continue
+                            if len(game["players"]) < 2:
+                                send_message(token, chat_id, "⚠️ Need at least 2 players to start!")
+                                continue
+                                
+                            colors = ["🔴", "🔵", "🟢", "🟡"]
+                            for idx, p in enumerate(game["players"]):
+                                game["colors"][p] = colors[idx]
+                                game["positions"][p] = 0
+                            
+                            game["status"] = "playing"
+                            game["turn_idx"] = 0
+                            
+                            board_text = render_ludo_board(game)
+                            reply_markup = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "🎲 Roll Dice", "callback_data": f"ludo_roll_{chat_id}"}
+                                    ]
+                                ]
+                            }
+                            
+                            url = f"https://api.telegram.org/bot{token}/editMessageText"
+                            data = {
+                                "chat_id": chat_id,
+                                "message_id": game["lobby_msg_id"],
+                                "text": markdown_to_html(board_text),
+                                "parse_mode": "HTML",
+                                "reply_markup": json.dumps(reply_markup)
+                            }
+                            try:
+                                requests.post(url, data=data, timeout=10)
+                            except:
+                                send_message(token, chat_id, board_text, reply_markup)
+                                
+                        elif ludo_cmd == "cancel":
+                            if chat_id not in active_ludo_games:
+                                continue
+                            game = active_ludo_games[chat_id]
+                            is_admin = is_user_group_admin(token, chat_id, sender_id, admin_id, user_data)
+                            if sender_str != game["host_id"] and not is_admin:
+                                send_message(token, chat_id, "⚠️ Only host or admins can cancel.")
+                                continue
+                            active_ludo_games.pop(chat_id)
+                            send_message(token, chat_id, "❌ Ludo game lobby has been cancelled.")
+                        continue
+
                     # -------- MODE COMMANDS --------
-                    if text == "/medusa":
+                    if cmd == "medusa":
                         user_record["active_mode"] = "medusa"
                         if "last_reset" not in user_record:
                             user_record["last_reset"] = time.time()
                         user_data[sender_str] = user_record
-                        save_user_data(user_data)
+                        save_single_user(sender_str, user_record)
                         
                         if chat_id in user_histories:
                             user_histories[chat_id].clear()
@@ -1577,10 +3006,10 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         )
                         continue
 
-                    if text == "/default":
+                    if cmd == "default":
                         user_record["active_mode"] = "groq"
                         user_data[sender_str] = user_record
-                        save_user_data(user_data)
+                        save_single_user(sender_str, user_record)
                         
                         if chat_id in user_histories:
                             user_histories[chat_id].clear()
@@ -1596,7 +3025,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         continue
 
                     # -------- CHECK LIMITS --------
-                    if text == "/check":
+                    if cmd == "check":
                         plan = user_record.get("plan", "free")
                         limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
                         
@@ -1615,7 +3044,6 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             sum_status = f"{sum_used}/{limits['summaries']}"
                             search_status = f"{search_used}/{limits['searches']}"
                             
-                        # Medusa mode credit status
                         now = time.time()
                         credits_used = user_record.get("credits_used", 0)
                         last_reset = user_record.get("last_reset", now)
@@ -1644,7 +3072,8 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             f"• *User Plan*: `{plan.upper()}` 💳\n"
                             f"• *Current Mode*: `{active_mode_display}`\n"
                             f"• *Medusa Mode Credits*: `{credit_info}`\n"
-                            f"• *Reset Timer*: `{reset_str}` ⏳\n\n"
+                            f"• *Reset Timer*: `{reset_str}` ⏳\n"
+                            f"• *Wallet*: `{user_record.get('points', 500)} points` 💰\n\n"
                             "*Daily Limit Usage*:\n"
                             f"• 🖼️ *Image Analyses*: `{img_status}`\n"
                             f"• 📄 *Doc Summaries*: `{sum_status}`\n"
@@ -1655,7 +3084,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         continue
 
                     # -------- UPGRADE PLAN --------
-                    if text == "/upgrade":
+                    if cmd == "upgrade":
                         already_unlimited = user_record.get("unlimited", False) or (sender_str == str(admin_id))
                         if already_unlimited:
                             send_message(
@@ -1698,17 +3127,17 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         continue
 
                     # -------- CLEAR HISTORY --------
-                    if text == "/clear":
+                    if cmd == "clear":
                         if chat_id in user_histories:
                             user_histories[chat_id].clear()
                         user_record["history"] = []
                         user_data[sender_str] = user_record
-                        save_user_data(user_data)
+                        save_single_user(sender_str, user_record)
                         send_message(token, chat_id, "🧹 Conversation history cleared.")
                         continue
 
                     # -------- HISTORY --------
-                    if text == "/history":
+                    if cmd == "history":
                         hist = user_record.get("history", [])
                         chat_lines = []
                         for msg in hist:
@@ -1726,8 +3155,9 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         continue
 
                     # -------- ADMIN PANEL --------
-                    if text == "/admin":
-                        if sender_str == str(admin_id):
+                    if cmd == "admin":
+                        is_sub = (user_record.get("role") == "subadmin")
+                        if sender_str == str(admin_id) or is_sub:
                             admin_text, reply_markup = get_admin_panel_data(admin_id)
                             send_message(token, chat_id, admin_text, reply_markup)
                         else:
