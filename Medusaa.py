@@ -209,7 +209,7 @@ def get_country():
 def check_internet():
     try:
         # Check standard endpoint or CyberNeurova for ping status
-        r = requests.get("https://api.cyberneurova.ai/v1/models", timeout=5)
+        r = requests.get("https://openroute.cyberneurova.com", timeout=5)
         ping = round(r.elapsed.total_seconds() * 1000)
         return "Online", ping
     except:
@@ -455,8 +455,7 @@ def ask_medusa(api_key, messages):
         "https://api.cyberneurova.ai/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+            "Content-Type": "application/json"
         },
         json={
             "model": "tiny-neurova",
@@ -845,12 +844,7 @@ def set_bot_commands(token, admin_id, user_data=None):
     default_cmds = [
         {"command": "start", "description": "Wake up Medusa 🐍"},
         {"command": "help", "description": "Show list of commands ℹ️"},
-        {"command": "ludo", "description": "Create Ludo board race lobby 🎲"},
-        {"command": "balance", "description": "Check point balance 💰"},
-        {"command": "daily", "description": "Claim daily rewards 🎁"},
-        {"command": "gift", "description": "Gift points to a friend 🎁"},
-        {"command": "leaderboard", "description": "View richest users 🏆"},
-        {"command": "guide", "description": "View full games guidebook 📖"},
+        {"command": "upgrade", "description": "Upgrade your plan with Stars 🚀"},
         {"command": "check", "description": "Check current mode and limits 📊"},
         {"command": "clear", "description": "Clear your conversation history 🧹"},
         {"command": "search", "description": "Toggle web search 🔍"},
@@ -858,25 +852,10 @@ def set_bot_commands(token, admin_id, user_data=None):
         {"command": "default", "description": "Switch to Default Mode 🔓"}
     ]
     
-    group_admin_cmds = [
-        {"command": "help", "description": "Show list of commands ℹ️"},
-        {"command": "ludo", "description": "Create Ludo board race lobby 🎲"},
-        {"command": "kick", "description": "Kick a member 🥾"},
-        {"command": "ban", "description": "Ban a member 🔨"},
-        {"command": "unban", "description": "Unban a member 🔓"},
-        {"command": "mute", "description": "Mute a member 🔇"},
-        {"command": "unmute", "description": "Unmute a member 🔊"}
-    ]
-    
     bot_admin_cmds = default_cmds + [
         {"command": "admin", "description": "Access Admin Dashboard 👑"},
         {"command": "subadmin", "description": "Promote/demote subadmins 🛠️"},
-        {"command": "export", "description": "Export target user profile 📤"},
-        {"command": "kick", "description": "Kick a member 🥾"},
-        {"command": "ban", "description": "Ban a member 🔨"},
-        {"command": "unban", "description": "Unban a member 🔓"},
-        {"command": "mute", "description": "Mute a member 🔇"},
-        {"command": "unmute", "description": "Unmute a member 🔊"}
+        {"command": "export", "description": "Export target user profile 📤"}
     ]
     
     try:
@@ -884,12 +863,6 @@ def set_bot_commands(token, admin_id, user_data=None):
         requests.post(f"https://api.telegram.org/bot{token}/setMyCommands", json={
             "commands": default_cmds,
             "scope": {"type": "default"}
-        }, timeout=10)
-        
-        # Register group admins
-        requests.post(f"https://api.telegram.org/bot{token}/setMyCommands", json={
-            "commands": group_admin_cmds,
-            "scope": {"type": "all_chat_administrators"}
         }, timeout=10)
         
         # Register bot owner
@@ -1043,28 +1016,8 @@ def notify_admin_upgrade_request(token, admin_id, requester_id, requester_name, 
 
 
 # =================================
-# 🎮 GAME & MODERATION GLOBAL STATES & HELPERS
+# 👥 ADMIN RESOLVERS & UTILS
 # =================================
-
-active_ludo_games = {}
-user_message_times = {}
-
-def is_user_group_admin(token, chat_id, user_id, admin_id, user_data):
-    if str(user_id) == str(admin_id):
-        return True
-    user_rec = user_data.get(str(user_id), {})
-    if user_rec.get("role") == "subadmin":
-        return True
-    if chat_id > 0:
-        return True
-    try:
-        r = requests.get(f"https://api.telegram.org/bot{token}/getChatMember", params={"chat_id": chat_id, "user_id": user_id}, timeout=5)
-        if r.status_code == 200:
-            status = r.json().get("result", {}).get("status", "")
-            return status in ["creator", "administrator"]
-    except Exception as e:
-        print(f"Error checking group admin status: {e}")
-    return False
 
 def resolve_target_user(message, args, user_data):
     if "reply_to_message" in message:
@@ -1083,70 +1036,6 @@ def resolve_target_user(message, args, user_data):
             return uid, info.get("first_name", "User"), info.get("username", "")
     return None, None, None
 
-def ban_user(token, chat_id, user_id):
-    url = f"https://api.telegram.org/bot{token}/banChatMember"
-    data = {"chat_id": chat_id, "user_id": user_id}
-    try:
-        r = requests.post(url, data=data, timeout=10)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"Error banning user: {e}")
-        return False
-
-def unban_user(token, chat_id, user_id):
-    url = f"https://api.telegram.org/bot{token}/unbanChatMember"
-    data = {"chat_id": chat_id, "user_id": user_id, "only_if_banned": True}
-    try:
-        r = requests.post(url, data=data, timeout=10)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"Error unbanning user: {e}")
-        return False
-
-def kick_user(token, chat_id, user_id):
-    if ban_user(token, chat_id, user_id):
-        time.sleep(0.5)
-        return unban_user(token, chat_id, user_id)
-    return False
-
-def mute_user(token, chat_id, user_id, duration_seconds):
-    url = f"https://api.telegram.org/bot{token}/restrictChatMember"
-    until_date = int(time.time() + duration_seconds)
-    permissions = {"can_send_messages": False}
-    data = {
-        "chat_id": chat_id,
-        "user_id": user_id,
-        "permissions": json.dumps(permissions),
-        "until_date": until_date
-    }
-    try:
-        r = requests.post(url, data=data, timeout=10)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"Error muting user: {e}")
-        return False
-
-def unmute_user(token, chat_id, user_id):
-    url = f"https://api.telegram.org/bot{token}/restrictChatMember"
-    permissions = {
-        "can_send_messages": True,
-        "can_send_media_messages": True,
-        "can_send_polls": True,
-        "can_send_other_messages": True,
-        "can_add_web_page_previews": True
-    }
-    data = {
-        "chat_id": chat_id,
-        "user_id": user_id,
-        "permissions": json.dumps(permissions)
-    }
-    try:
-        r = requests.post(url, data=data, timeout=10)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"Error unmuting user: {e}")
-        return False
-
 def send_document(token, chat_id, file_name, file_content):
     url = f"https://api.telegram.org/bot{token}/sendDocument"
     files = {"document": (file_name, io.BytesIO(file_content.encode("utf-8")))}
@@ -1160,62 +1049,7 @@ def send_document(token, chat_id, file_name, file_content):
 
 
 
-def render_ludo_board(game):
-    lines = []
-    lines.append("🎲 *LUDO BOARD RACE* 🎲")
-    lines.append("--------------------------------")
-    
-    for p_id in game["players"]:
-        p_name = game["player_names"][p_id]
-        p_pos = game["positions"][p_id]
-        p_color = game["colors"][p_id]
-        lines.append(f"{p_color} *{p_name}*: Step `{p_pos}/30`" + (" (HOME! 🏆)" if p_pos == 30 else ""))
-    
-    lines.append("")
-    
-    def get_step_emoji(step):
-        players_here = []
-        for p_id in game["players"]:
-            if game["positions"][p_id] == step:
-                players_here.append(game["colors"][p_id])
-        
-        if players_here:
-            return "".join(players_here)
-            
-        if step == 0:
-            return "🏠"
-        elif step == 30:
-            return "🏆"
-        elif step in [8, 15, 22]:
-            return "🛡️"
-        elif step == 12:
-            return "🚀"
-        elif step == 25:
-            return "🕸️"
-        else:
-            return "▫️"
-            
-    row1 = " ".join(get_step_emoji(i) for i in range(0, 11))
-    row2 = " ".join(get_step_emoji(i) for i in range(11, 21))
-    row3 = " ".join(get_step_emoji(i) for i in range(21, 31))
-    
-    lines.append(f"🏁 `{row1}`")
-    lines.append(f"   `{row2}`")
-    lines.append(f"👉 `{row3}`")
-    lines.append("")
-    
-    lines.append("`🏠:Start | 🛡️:Safe | 🚀:Boost | 🕸️:Trap | 🏆:Home`")
-    lines.append("--------------------------------")
-    
-    if game.get("last_roll"):
-        lines.append(f"🎲 *{game['last_roller']}* rolled a `{game['last_roll']}`!")
-    
-    active_player_id = game["players"][game["turn_idx"]]
-    active_player_name = game["player_names"][active_player_id]
-    active_player_color = game["colors"][active_player_id]
-    lines.append(f"➡️ Turn: {active_player_color} *{active_player_name}*")
-    
-    return "\n".join(lines)
+
 
 
 # =================================
@@ -1246,14 +1080,26 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
             for update in data.get("result", []):
                 last_update = update["update_id"]
 
+                # -------- AUTOMATED PRE-CHECKOUT QUERY RESPONSE --------
+                if "pre_checkout_query" in update:
+                    pre_checkout = update["pre_checkout_query"]
+                    pre_checkout_id = pre_checkout["id"]
+                    requests.post(
+                        f"https://api.telegram.org/bot{token}/answerPreCheckoutQuery",
+                        json={"pre_checkout_query_id": pre_checkout_id, "ok": True}
+                    )
+                    continue
+
                 # =================================
                 # 🖱 CALLBACK QUERIES (Admin Panel)
                 # =================================
                 if "callback_query" in update:
                     callback_query = update["callback_query"]
+                    chat_id = callback_query["message"]["chat"]["id"]
+                    if chat_id < 0:
+                        continue
                     callback_data = callback_query.get("data", "")
                     sender_id = callback_query["from"]["id"]
-                    chat_id = callback_query["message"]["chat"]["id"]
                     msg_id = callback_query["message"]["message_id"]
 
                     # -------- USER-INITIATED: Request credit reset (non-admin) --------
@@ -1270,27 +1116,33 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         send_message(token, chat_id, "📩 Your credit reset request has been sent to the Admin. Please wait for approval.")
                         continue
 
-                    # -------- USER-INITIATED: Plan Upgrade requests --------
-                    if callback_data.startswith("req_upg_") and str(sender_id) != str(admin_id):
-                        requested_plan = callback_data.split("req_upg_")[1]
-                        upg_data = load_user_data()
-                        upg_rec = upg_data.get(str(sender_id), {})
-                        upg_name = upg_rec.get("first_name", "User")
-                        upg_username = upg_rec.get("username", "")
+                    # -------- USER-INITIATED: Plan Upgrade Stars Invoice --------
+                    if callback_data.startswith("pay_stars_"):
+                        plan_name = callback_data.split("pay_stars_")[1]
+                        stars_amount = 150 if plan_name == "premium" else 500
                         
-                        notify_admin_upgrade_request(token, admin_id, str(sender_id), upg_name, upg_username, requested_plan)
+                        url = f"https://api.telegram.org/bot{token}/sendInvoice"
+                        data = {
+                            "chat_id": chat_id,
+                            "title": f"Medusa {plan_name.capitalize()} Upgrade",
+                            "description": f"Upgrade to Medusa's AI {plan_name.capitalize()} Plan with higher daily limits.",
+                            "payload": f"upg_{plan_name}_{sender_id}",
+                            "provider_token": "", # Empty for Telegram Stars
+                            "currency": "XTR", # Telegram Stars currency
+                            "prices": json.dumps([{"label": f"{plan_name.capitalize()} Plan", "amount": stars_amount}])
+                        }
                         
-                        requests.post(
-                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
-                            data={"callback_query_id": callback_query["id"], "text": "Upgrade request sent!"}
-                        )
-                        price = "$3" if requested_plan == "premium" else "$10"
-                        send_message(
-                            token, chat_id,
-                            f"Your upgrade request for the *{requested_plan.capitalize()} Plan ({price})* has been sent to the Admin.\n\n"
-                            f"Please complete the {price} payment using the method your admin provides. "
-                            "Your account will be upgraded as soon as it is verified."
-                        )
+                        try:
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "Generating invoice..."}
+                            )
+                            r = requests.post(url, data=data, timeout=10)
+                            if r.status_code != 200:
+                                print(f"Error sending Stars invoice: {r.text}")
+                                send_message(token, chat_id, f"⚠️ Failed to generate invoice: {r.json().get('description')}")
+                        except Exception as e:
+                            print(f"Exception sending Stars invoice: {e}")
                         continue
 
                     # Admin and Subadmin callbacks from here
@@ -1360,91 +1212,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         )
                         update_admin_panel(token, chat_id, msg_id, admin_id)
 
-                    elif callback_data.startswith("approve_upg_"):
-                        parts = callback_data.split("_")
-                        target_plan = parts[2]
-                        target_id = parts[3]
-                        
-                        user_data = load_user_data()
-                        if target_id in user_data:
-                            user_data[target_id]["plan"] = target_plan
-                            user_data[target_id]["images_today"] = 0
-                            user_data[target_id]["summaries_today"] = 0
-                            user_data[target_id]["searches_today"] = 0
-                            user_data[target_id]["credits_used"] = 0
-                            user_data[target_id]["last_reset"] = time.time()
-                            save_user_data(user_data)
-                            
-                            tgt_name = user_data[target_id].get("first_name", "User")
-                            price = "$3" if target_plan == "premium" else "$10"
-                            send_message(
-                                token, int(target_id),
-                                f"🎉 *Upgrade Approved!*\n\n"
-                                f"Your {price} upgrade has been verified. You now have *{target_plan.capitalize()} Plan* access. "
-                                f"Check your new limits using `/check`!"
-                            )
-                            msg_text = f"Upgrade to {target_plan} approved for {tgt_name}!"
-                        else:
-                            msg_text = "User not found!"
 
-                        requests.post(
-                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
-                            data={"callback_query_id": callback_query["id"], "text": msg_text}
-                        )
-
-                    elif callback_data.startswith("deny_upg_"):
-                        parts = callback_data.split("_")
-                        target_plan = parts[2]
-                        target_id = parts[3]
-                        
-                        user_data = load_user_data()
-                        tgt_name = user_data.get(target_id, {}).get("first_name", "User")
-                        
-                        send_message(
-                            token, int(target_id),
-                            f"Your upgrade request for the *{target_plan.capitalize()} Plan* was not approved at this time. "
-                            "Please contact the admin if you believe this is a mistake."
-                        )
-                        requests.post(
-                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
-                            data={"callback_query_id": callback_query["id"], "text": f"Upgrade denied for {tgt_name}."}
-                        )
-
-                    elif callback_data.startswith("approve_upgrade_"):
-                        target_id = callback_data.split("approve_upgrade_")[1]
-                        user_data = load_user_data()
-                        if target_id in user_data:
-                            user_data[target_id]["unlimited"] = True
-                            save_user_data(user_data)
-                            tgt_name = user_data[target_id].get("first_name", "User")
-                            send_message(
-                                token, int(target_id),
-                                "Upgrade Approved!\n\n"
-                                "Your $2 upgrade has been verified. You now have Unlimited Premium access. "
-                                "No daily limits apply to you anymore. Enjoy! \U0001f680\u267e\ufe0f"
-                            )
-                            msg_text = f"Upgrade approved for {tgt_name}!"
-                        else:
-                            msg_text = "User not found!"
-
-                        requests.post(
-                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
-                            data={"callback_query_id": callback_query["id"], "text": msg_text}
-                        )
-
-                    elif callback_data.startswith("deny_upgrade_"):
-                        target_id = callback_data.split("deny_upgrade_")[1]
-                        user_data = load_user_data()
-                        tgt_name = user_data.get(target_id, {}).get("first_name", "User")
-                        send_message(
-                            token, int(target_id),
-                            "Your upgrade request was not approved at this time. "
-                            "Please contact the admin if you believe this is a mistake."
-                        )
-                        requests.post(
-                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
-                            data={"callback_query_id": callback_query["id"], "text": f"Upgrade denied for {tgt_name}."}
-                        )
 
                     elif callback_data == "reset_all":
                         user_data = load_user_data()
@@ -1469,229 +1237,83 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
 
 
 
-                    # -------- LUDO GAMEPLAY CALLBACKS --------
-                    elif callback_data.startswith("ludo_join_") or callback_data.startswith("ludo_start_") or callback_data.startswith("ludo_cancel_") or callback_data.startswith("ludo_roll_"):
-                        target_chat_id = int(callback_data.split("_")[-1])
-                        
-                        if target_chat_id not in active_ludo_games:
-                            requests.post(
-                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
-                                data={"callback_query_id": callback_query["id"], "text": "Game lobby not found or has expired! 🚫"}
-                            )
-                            requests.post(f"https://api.telegram.org/bot{token}/editMessageReplyMarkup", json={"chat_id": chat_id, "message_id": msg_id, "reply_markup": None})
-                            continue
-                            
-                        game = active_ludo_games[target_chat_id]
-                        sender_str = str(sender_id)
-                        sender_name = user_data.get(sender_str, {}).get("first_name", "User")
-                        
-                        if "ludo_join_" in callback_data:
-                            if game["status"] != "lobby":
-                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Game is already in progress!"})
-                                continue
-                            
-                            db_data = load_user_data()
-                            if sender_str not in db_data:
-                                requests.post(
-                                    f"https://api.telegram.org/bot{token}/answerCallbackQuery",
-                                    data={
-                                        "callback_query_id": callback_query["id"],
-                                        "text": "⚠️ You must first start/message the bot in private chat to register before you can join!",
-                                        "show_alert": True
-                                    }
-                                )
-                                continue
 
-                            if sender_str in game["players"]:
-                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "You already joined!"})
-                                continue
-                            if len(game["players"]) >= 4:
-                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Lobby is full!"})
-                                continue
-                                
-                            game["players"].append(sender_str)
-                            game["player_names"][sender_str] = sender_name
-                            game["positions"][sender_str] = 0
-                            
-                            player_list = "\n".join(f"{idx+1}. *{game['player_names'][p]}*" for idx, p in enumerate(game["players"]))
-                            lobby_text = (
-                                "🎲 *LUDO BOARD RACE - LOBBY* 🎲\n"
-                                "-------------------------------------\n"
-                                f"Host: *{game['player_names'][game['host_id']]}*\n\n"
-                                "👥 *Joined Players*:\n"
-                                f"{player_list}\n\n"
-                                "Click below to join!"
-                            )
-                            reply_markup = {
-                                "inline_keyboard": [
-                                    [
-                                        {"text": "➕ Join Lobby", "callback_data": f"ludo_join_{target_chat_id}"},
-                                        {"text": "🚀 Start Game", "callback_data": f"ludo_start_{target_chat_id}"}
-                                    ],
-                                    [
-                                        {"text": "❌ Cancel Game", "callback_data": f"ludo_cancel_{target_chat_id}"}
-                                    ]
-                                ]
-                            }
-                            requests.post(
-                                f"https://api.telegram.org/bot{token}/editMessageText",
-                                data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(lobby_text), "parse_mode": "HTML", "reply_markup": json.dumps(reply_markup)}
-                            )
-                            requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Joined successfully!"})
-                            
-                        elif "ludo_start_" in callback_data:
-                            if game["status"] != "lobby":
-                                continue
-                            if sender_str != game["host_id"]:
-                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Only the host can start the game! 🚫", "show_alert": True})
-                                continue
-                            if len(game["players"]) < 2:
-                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Need at least 2 players to start! 👥", "show_alert": True})
-                                continue
-                                
-                            colors = ["🔴", "🔵", "🟢", "🟡"]
-                            for idx, p in enumerate(game["players"]):
-                                game["colors"][p] = colors[idx]
-                                game["positions"][p] = 0
-                            
-                            game["status"] = "playing"
-                            game["turn_idx"] = 0
-                            
-                            board_text = render_ludo_board(game)
-                            reply_markup = {
-                                "inline_keyboard": [
-                                    [
-                                        {"text": "🎲 Roll Dice", "callback_data": f"ludo_roll_{target_chat_id}"}
-                                    ]
-                                ]
-                            }
-                            requests.post(
-                                f"https://api.telegram.org/bot{token}/editMessageText",
-                                data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(board_text), "parse_mode": "HTML", "reply_markup": json.dumps(reply_markup)}
-                            )
-                            requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Game started!"})
-                            
-                        elif "ludo_cancel_" in callback_data:
-                            is_admin = is_user_group_admin(token, chat_id, sender_id, admin_id, user_data)
-                            if sender_str != game["host_id"] and not is_admin:
-                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "Only host or admins can cancel! 🚫", "show_alert": True})
-                                continue
-                                
-                            active_ludo_games.pop(target_chat_id)
-                            requests.post(
-                                f"https://api.telegram.org/bot{token}/editMessageText",
-                                data={"chat_id": chat_id, "message_id": msg_id, "text": "❌ Ludo game lobby cancelled.", "reply_markup": None}
-                            )
-                            requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"]})
-                            
-                        elif "ludo_roll_" in callback_data:
-                            active_player_id = game["players"][game["turn_idx"]]
-                            if sender_str != active_player_id:
-                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "It is not your turn, mortal! 🚫", "show_alert": True})
-                                continue
-                                
-                            import random
-                            roll = random.randint(1, 6)
-                            cur_pos = game["positions"][sender_str]
-                            new_pos = cur_pos + roll
-                            
-                            log_msg = ""
-                            if new_pos > 30:
-                                new_pos = cur_pos
-                            else:
-                                game["positions"][sender_str] = new_pos
-                                
-                                if new_pos not in [0, 8, 15, 22, 30]:
-                                    kicked_players = []
-                                    for other_id in game["players"]:
-                                        if other_id != sender_str and game["positions"][other_id] == new_pos:
-                                            game["positions"][other_id] = 0
-                                            kicked_players.append(game["player_names"][other_id])
-                                    if kicked_players:
-                                        pass
-                                
-                                if new_pos == 12:
-                                    game["positions"][sender_str] = 18
-                                elif new_pos == 25:
-                                    game["positions"][sender_str] = 10
-                                    
-                            game["last_roll"] = roll
-                            game["last_roller"] = sender_name
-                            
-                            if new_pos == 30:
-                                active_ludo_games.pop(target_chat_id)
-                                winner_rec = user_data.get(sender_str, {})
-                                winner_rec["points"] = winner_rec.get("points", 500) + 1000
-                                save_single_user(sender_str, winner_rec)
-                                
-                                win_text = (
-                                    "🏆 *LUDO BOARD RACE - GAME OVER* 🏆\n"
-                                    "-------------------------------------\n"
-                                    f"🎉 *{sender_name}* ({game['colors'][sender_str]}) has reached Home (step 30) and won the game!\n"
-                                    f"Grand prize: `1,000 points`!\n"
-                                    f"New Balance: `{winner_rec['points']} points`"
-                                )
-                                requests.post(
-                                    f"https://api.telegram.org/bot{token}/editMessageText",
-                                    data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(win_text), "parse_mode": "HTML", "reply_markup": None}
-                                )
-                                requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": "You won the game! 🎉"})
-                                continue
-                                
-                            game["turn_idx"] = (game["turn_idx"] + 1) % len(game["players"])
-                            board_text = render_ludo_board(game)
-                            
-                            reply_markup = {
-                                "inline_keyboard": [
-                                    [
-                                        {"text": "🎲 Roll Dice", "callback_data": f"ludo_roll_{target_chat_id}"}
-                                    ]
-                                ]
-                            }
-                            requests.post(
-                                f"https://api.telegram.org/bot{token}/editMessageText",
-                                data={"chat_id": chat_id, "message_id": msg_id, "text": markdown_to_html(board_text), "parse_mode": "HTML", "reply_markup": json.dumps(reply_markup)}
-                            )
-                            requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data={"callback_query_id": callback_query["id"], "text": f"Rolled a {roll}!"})
-                        
-                        continue
 
                     continue
 
                 # =================================
-                # 💬 TEXT MESSAGES
+                # 💬 PRIVATE CHAT MESSAGES
                 # =================================
                 if "message" in update:
                     message = update["message"]
                     chat_id = message["chat"]["id"]
+                    if chat_id < 0:
+                        continue
+                        
                     sender_id = message["from"]["id"]
                     first_name = message["from"].get("first_name", "User")
                     username = message["from"].get("username", "")
                     sender_str = str(sender_id)
+                    session_key = str(chat_id)
 
-                    # -------- WELCOME & LEFT GREETINGS --------
-                    if "new_chat_members" in message:
-                        for member in message["new_chat_members"]:
-                            if bot_username and member.get("username", "").lower() == bot_username.lower():
-                                send_message(token, chat_id, "🐍 *Medusa has entered the chat.* Type `/help` for commands!")
-                                continue
-                            m_name = member.get("first_name", "User")
-                            m_username = f" (@{member['username']})" if member.get("username") else ""
-                            welcome_msg = (
-                                f"👋 *Welcome to the group, {m_name}{m_username}!* 🐍✨\n"
-                                f"I am Medusa. Type `/help` to see my commands, play games, and earn points!"
+                    # -------- SUCCESSFUL PAYMENT DETECTED --------
+                    if "successful_payment" in message:
+                        sp = message["successful_payment"]
+                        payload = sp.get("invoice_payload", "")
+                        if payload.startswith("upg_"):
+                            parts = payload.split("_")
+                            plan_type = parts[1]
+                            target_id = parts[2]
+                            
+                            user_data = load_user_data()
+                            if target_id not in user_data:
+                                user_data[target_id] = {
+                                    "credits_used": 0,
+                                    "last_reset": time.time(),
+                                    "username": username,
+                                    "first_name": first_name,
+                                    "active_mode": "groq",
+                                    "preferences": {},
+                                    "history": [],
+                                    "plan": "free",
+                                    "images_today": 0,
+                                    "summaries_today": 0,
+                                    "searches_today": 0,
+                                    "last_reset_date": datetime.now().strftime("%Y-%m-%d"),
+                                    "role": "user"
+                                }
+                            
+                            tgt_rec = user_data[target_id]
+                            tgt_rec["plan"] = plan_type
+                            tgt_rec["images_today"] = 0
+                            tgt_rec["summaries_today"] = 0
+                            tgt_rec["searches_today"] = 0
+                            tgt_rec["credits_used"] = 0
+                            tgt_rec["last_reset"] = time.time()
+                            save_single_user(target_id, tgt_rec)
+                            
+                            send_message(
+                                token, chat_id,
+                                f"🎉 *Upgrade Successful!*\n\n"
+                                f"Your payment of *{sp.get('total_amount')} Stars* has been processed via Fragment/Telegram.\n"
+                                f"Your account has been upgraded to the *{plan_type.upper()}* plan!\n"
+                                "Your new limits are now active. Type `/check` to verify your balance and status.\n\n"
+                                "💬 Support/Inquiries: Contact the owner at https://t.me/w4simg"
                             )
-                            send_message(token, chat_id, welcome_msg)
+                            
+                            # Notify the admin
+                            try:
+                                send_message(
+                                    token, admin_id,
+                                    f"💰 *New Stars Payment Completed!*\n\n"
+                                    f"• *User:* {first_name} (@{username})\n"
+                                    f"• *ID:* `{target_id}`\n"
+                                    f"• *Plan:* `{plan_type.upper()}`\n"
+                                    f"• *Amount:* `{sp.get('total_amount')} Stars`"
+                                )
+                            except Exception:
+                                pass
                         continue
-
-                    if "left_chat_member" in message:
-                        member = message["left_chat_member"]
-                        m_name = member.get("first_name", "User")
-                        left_msg = f"👋 *Goodbye, {m_name}.* The serpent's watch over you ends. 🐍"
-                        send_message(token, chat_id, left_msg)
-                        continue
-
-                    session_key = str(chat_id) if chat_id > 0 else f"{chat_id}_{sender_id}"
 
                     # Register user in stats immediately
                     user_data = load_user_data()
@@ -1710,12 +1332,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             "summaries_today": 0,
                             "searches_today": 0,
                             "last_reset_date": current_date_str,
-                            "points": 500,
-                            "role": "user",
-                            "inventory": {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0},
-                            "pickaxe": "wooden",
-                            "last_mine_time": 0.0,
-                            "last_daily_claim": 0.0
+                            "role": "user"
                         }
                         save_user_data(user_data)
 
@@ -1739,23 +1356,8 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                     if "last_reset_date" not in user_record:
                         user_record["last_reset_date"] = current_date_str
                         modified = True
-                    if "points" not in user_record:
-                        user_record["points"] = 500
-                        modified = True
                     if "role" not in user_record:
                         user_record["role"] = "user"
-                        modified = True
-                    if "inventory" not in user_record:
-                        user_record["inventory"] = {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0}
-                        modified = True
-                    if "pickaxe" not in user_record:
-                        user_record["pickaxe"] = "wooden"
-                        modified = True
-                    if "last_mine_time" not in user_record:
-                        user_record["last_mine_time"] = 0.0
-                        modified = True
-                    if "last_daily_claim" not in user_record:
-                        user_record["last_daily_claim"] = 0.0
                         modified = True
                         
                     # Handle daily reset check
@@ -1773,19 +1375,6 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
 
                     # -------- DOCUMENT MESSAGE --------
                     if "document" in message:
-                        # If in group, check if bot is mentioned in caption or replied to
-                        if chat_id < 0:
-                            is_mentioned = False
-                            caption = message.get("caption", "").strip()
-                            if bot_username and f"@{bot_username.lower()}" in caption.lower():
-                                is_mentioned = True
-                            elif "reply_to_message" in message:
-                                reply_to = message["reply_to_message"]
-                                if reply_to.get("from", {}).get("username", "").lower() == bot_username.lower():
-                                    is_mentioned = True
-                            if not is_mentioned:
-                                continue
-
                         doc = message["document"]
                         file_id = doc["file_id"]
                         file_name = doc.get("file_name", "document")
@@ -1889,19 +1478,6 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
 
                     # -------- PHOTO MESSAGE --------
                     if "photo" in message:
-                        # If in group, check if bot is mentioned in caption or replied to
-                        if chat_id < 0:
-                            is_mentioned = False
-                            caption = message.get("caption", "").strip()
-                            if bot_username and f"@{bot_username.lower()}" in caption.lower():
-                                is_mentioned = True
-                            elif "reply_to_message" in message:
-                                reply_to = message["reply_to_message"]
-                                if reply_to.get("from", {}).get("username", "").lower() == bot_username.lower():
-                                    is_mentioned = True
-                            if not is_mentioned:
-                                continue
-
                         photo = message["photo"]
                         file_id = photo[-1]["file_id"]
                         caption = message.get("caption", "").strip()
@@ -2004,101 +1580,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             args_str = cmd_match.group(2) or ""
                             args = args_str.split()
 
-                    # Enforce mention requirement for group queries (non-commands)
-                    if cmd is None and chat_id < 0:
-                        is_mentioned = False
-                        if bot_username and f"@{bot_username.lower()}" in text.lower():
-                            is_mentioned = True
-                            text = re.sub(rf"@{re.escape(bot_username)}", "", text, flags=re.IGNORECASE).strip()
-                        elif "reply_to_message" in message:
-                            reply_to = message["reply_to_message"]
-                            if reply_to.get("from", {}).get("username", "").lower() == bot_username.lower():
-                                is_mentioned = True
-                        if not is_mentioned:
-                            continue
 
-                    # -------- SPAM DETECTION (Groups Only) --------
-                    if chat_id < 0:
-                        now_ts = time.time()
-                        if chat_id not in user_message_times:
-                            user_message_times[chat_id] = {}
-                        if sender_id not in user_message_times[chat_id]:
-                            user_message_times[chat_id][sender_id] = []
-                        
-                        user_message_times[chat_id][sender_id].append(now_ts)
-                        user_message_times[chat_id][sender_id] = [t for t in user_message_times[chat_id][sender_id] if now_ts - t <= 5]
-                        
-                        if len(user_message_times[chat_id][sender_id]) > 5:
-                            warnings = user_record.get("spam_warnings", 0) + 1
-                            user_record["spam_warnings"] = warnings
-                            save_single_user(sender_str, user_record)
-                            
-                            mention = f"@{username}" if username else first_name
-                            if warnings >= 3:
-                                user_record["spam_warnings"] = 0
-                                save_single_user(sender_str, user_record)
-                                if mute_user(token, chat_id, sender_id, 600):
-                                    send_message(token, chat_id, f"🔇 *Spam Limit Exceeded!* {mention} has been muted for 10 minutes. Please follow group rules.")
-                                else:
-                                    send_message(token, chat_id, f"⚠️ *Spam Limit Exceeded!* Please slow down, {mention} (Failed to mute, make sure I am admin).")
-                            else:
-                                send_message(token, chat_id, f"⚠️ *Spam Warning!* {mention}, slow down. Warning `{warnings}/3`.")
-                            continue
-
-                    # -------- KICK / BAN / UNBAN / MUTE / UNMUTE (Group Moderation) --------
-                    if cmd in ["kick", "ban", "unban", "mute", "unmute"]:
-                        if chat_id >= 0:
-                            send_message(token, chat_id, "⚠️ Moderation commands can only be used in group chats!")
-                            continue
-                            
-                        is_authorized = is_user_group_admin(token, chat_id, sender_id, admin_id, user_data)
-                        if not is_authorized:
-                            send_message(token, chat_id, "🚫 *You are not authorized to use moderation commands.*")
-                            continue
-                            
-                        tgt_id, tgt_name, tgt_username = resolve_target_user(message, args, user_data)
-                        if not tgt_id:
-                            send_message(token, chat_id, f"⚠️ Specify a user to {cmd} (reply to their message or provide `@username`/`user_id`).")
-                            continue
-                            
-                        if tgt_id == sender_str:
-                            send_message(token, chat_id, f"😏 Gifting a {cmd} to yourself? Not happening.")
-                            continue
-                            
-                        if str(tgt_id) == str(admin_id):
-                            send_message(token, chat_id, "⚠️ You cannot moderate the bot owner!")
-                            continue
-                            
-                        success = False
-                        if cmd == "ban":
-                            success = ban_user(token, chat_id, tgt_id)
-                            msg = f"🔨 *{tgt_name}* (@{tgt_username or 'no_username'}) has been banned from the group."
-                        elif cmd == "unban":
-                            success = unban_user(token, chat_id, tgt_id)
-                            msg = f"🔓 *{tgt_name}* (@{tgt_username or 'no_username'}) has been unbanned."
-                        elif cmd == "kick":
-                            success = kick_user(token, chat_id, tgt_id)
-                            msg = f"🥾 *{tgt_name}* (@{tgt_username or 'no_username'}) has been kicked from the group."
-                        elif cmd == "mute":
-                            duration = 600
-                            if len(args) > 1:
-                                try:
-                                    duration = int(args[1]) * 60
-                                    if duration <= 0:
-                                        duration = 600
-                                except:
-                                    pass
-                            success = mute_user(token, chat_id, tgt_id, duration)
-                            msg = f"🔇 *{tgt_name}* (@{tgt_username or 'no_username'}) has been muted for {duration//60} minutes."
-                        elif cmd == "unmute":
-                            success = unmute_user(token, chat_id, tgt_id)
-                            msg = f"🔊 *{tgt_name}* (@{tgt_username or 'no_username'}) has been unmuted."
-                            
-                        if success:
-                            send_message(token, chat_id, msg)
-                        else:
-                            send_message(token, chat_id, f"⚠️ Failed to {cmd} user. Make sure I am an administrator with appropriate privileges.")
-                        continue
 
                     # -------- SUBADMIN ROLE MANAGEMENT --------
                     if cmd == "subadmin":
@@ -2214,28 +1696,21 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             "🐍 *Medusa Bot Commands*:\n"
                             "• `/start` - Wake up the bot\n"
                             "• `/help` - Show this help menu\n"
+                            "• `/upgrade` - Upgrade your plan using Telegram Stars 🚀\n"
                             "• `/default` - Switch to Default Mode 🔓\n"
                             "• `/medusa` - Switch to Premium Mode 🌟\n"
                             "• `/check` - Check mode and limits 📊\n"
                             "• `/clear` - Reset your conversation history 🧹\n"
                             "• `/search` - Toggle automatic web search mode 🔍\n"
                             "• `/mood <normal|angry>` - Adjust mood 🎭\n"
-                            "• `/temp <0.1-1.0>` - Adjust creativity 🌡️\n\n"
-                            "🎮 *Games & Economy*:\n"
-                            "• `/ludo` - Create Ludo board race lobby 🎲\n"
-                            "• `/balance` - Check point balance 💰\n"
-                            "• `/daily` - Claim daily point reward 🎁\n"
-                            "• `/gift <user> <amount>` - Transfer points 🎁\n"
-                            "• `/leaderboard` - See richest users 🏆\n"
-                            "• `/guide` - View full games guidebook 📖"
+                            "• `/temp <0.1-1.0>` - Adjust creativity 🌡️"
                         )
                         is_sub = (user_record.get("role") == "subadmin")
                         if sender_str == str(admin_id) or is_sub:
                             commands += "\n\n👑 *Admin/Subadmin Commands*:\n"
                             commands += "• `/admin` - Access Admin Dashboard\n"
                             commands += "• `/subadmin` - Promote/demote/list subadmins\n"
-                            commands += "• `/export <user>` - Export target user database profile\n"
-                            commands += "• Moderation: `/kick`, `/ban`, `/unban`, `/mute [mins]`, `/unmute`"
+                            commands += "• `/export <user>` - Export target user database profile"
                         send_message(token, chat_id, commands)
                         continue
 
@@ -2293,306 +1768,14 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             f"\U0001f4e7 *Username:* {display_username}\n"
                             f"\U0001f194 *Chat ID:* `{chat_id}`\n"
                             f"\U0001f4ca *Active Mode:* {mode_display}\n"
-                            f"\U0001f4b3 *Credits:* {credit_info}\n"
-                            f"💰 *Wallet:* `{user_record.get('points', 500)} points`\n\n"
-                            "Use `/help` to see all active commands, mortal. Enjoy the games!"
+                            f"\U0001f4b3 *Credits:* {credit_info}\n\n"
+                            "Use `/help` to see all active commands, mortal."
                         )
 
                         send_message(token, chat_id, info_card)
                         continue
 
-                    # -------- POINTS & BALANCE --------
-                    if cmd in ["balance", "bal", "wallet"]:
-                        pts = user_record.get("points", 500)
-                        send_message(token, chat_id, f"💰 *{first_name}'s Balance*:\nYou have `{pts} points`.")
-                        continue
 
-                    # -------- DAILY CLAIM --------
-                    if cmd == "daily":
-                        now = time.time()
-                        last_daily = user_record.get("last_daily_claim", 0.0)
-                        cooldown = 86400
-                        if now - last_daily < cooldown:
-                            remaining = cooldown - (now - last_daily)
-                            hours = int(remaining // 3600)
-                            minutes = int((remaining % 3600) // 60)
-                            send_message(token, chat_id, f"⏳ You have already claimed your daily points, mortal! Come back in `{hours}h {minutes}m`.")
-                        else:
-                            reward = 200
-                            user_record["points"] = user_record.get("points", 500) + reward
-                            user_record["last_daily_claim"] = now
-                            save_single_user(sender_str, user_record)
-                            send_message(token, chat_id, f"🎉 *Daily Claim Successful!*\nMedusa has granted you `{reward} points`! Current balance: `{user_record['points']} points`.")
-                        continue
-
-                    # -------- GIFT POINTS --------
-                    if cmd in ["gift", "transfer"]:
-                        if len(args) < 2:
-                            send_message(token, chat_id, "⚠️ Usage: `/gift <reply | @username | user_id> <amount>`")
-                            continue
-                        try:
-                            amount = int(args[-1])
-                            if amount <= 0:
-                                raise ValueError
-                        except:
-                            send_message(token, chat_id, "⚠️ Please specify a valid positive amount of points to gift.")
-                            continue
-                        
-                        target_args = args[:-1]
-                        tgt_id, tgt_name, tgt_username = resolve_target_user(message, target_args, user_data)
-                        if not tgt_id:
-                            send_message(token, chat_id, "⚠️ Target user not found. Reply to their message or specify `@username` / `user_id`.")
-                            continue
-                        
-                        if tgt_id == sender_str:
-                            send_message(token, chat_id, "😏 Gifting points to yourself? Medusa is not amused.")
-                            continue
-                        
-                        my_pts = user_record.get("points", 500)
-                        if my_pts < amount:
-                            send_message(token, chat_id, f"⚠️ You do not have enough points. Balance: `{my_pts} points`.")
-                            continue
-                        
-                        tgt_record = user_data.get(tgt_id)
-                        if not tgt_record:
-                            tgt_record = {
-                                "credits_used": 0,
-                                "last_reset": time.time(),
-                                "username": tgt_username,
-                                "first_name": tgt_name,
-                                "active_mode": "groq",
-                                "preferences": {},
-                                "history": [],
-                                "plan": "free",
-                                "images_today": 0,
-                                "summaries_today": 0,
-                                "searches_today": 0,
-                                "last_reset_date": datetime.now().strftime("%Y-%m-%d"),
-                                "points": 500,
-                                "role": "user",
-                                "inventory": {"coal": 0, "iron": 0, "gold": 0, "diamond": 0, "medusite": 0},
-                                "pickaxe": "wooden",
-                                "last_mine_time": 0.0,
-                                "last_daily_claim": 0.0
-                            }
-                        
-                        user_record["points"] = my_pts - amount
-                        tgt_record["points"] = tgt_record.get("points", 500) + amount
-                        
-                        save_single_user(sender_str, user_record)
-                        save_single_user(tgt_id, tgt_record)
-                        
-                        send_message(token, chat_id, f"🎁 *Gift Successful!*\nYou gifted `{amount} points` to *{tgt_name}* (@{tgt_username or 'no_username'}).")
-                        continue
-
-                    # -------- LEADERBOARD --------
-                    if cmd in ["leaderboard", "rich"]:
-                        sorted_users = sorted(user_data.items(), key=lambda x: x[1].get("points", 500), reverse=True)
-                        lines = ["🏆 *MEDUSA POINTS LEADERBOARD* 🏆", "--------------------------------------"]
-                        for idx, (uid, info) in enumerate(sorted_users[:10], 1):
-                            name = info.get("first_name", "User")
-                            pts = info.get("points", 500)
-                            lines.append(f"{idx}. *{name}* — `{pts} pts`")
-                        send_message(token, chat_id, "\n".join(lines))
-                        continue
-
-                    # -------- GUIDE --------
-                    if cmd in ["guide", "games"]:
-                        guide = (
-                            "📖 *MEDUSA COMPREHENSIVE GAME BOOK* 🐍\n"
-                            "====================================\n\n"
-                            "💰 *POINTS & ECONOMY*\n"
-                            "• `/balance` (or `/bal`) - Check your current wallet points.\n"
-                            "• `/daily` - Claim 200 points every 24 hours.\n"
-                            "• `/gift <user> <amount>` - Gift points to another user.\n"
-                            "• `/leaderboard` (or `/rich`) - View top 10 richest players.\n\n"
-                            "🎲 *LUDO BOARD RACE*\n"
-                            "A fast-paced board race on a 30-step path played with inline buttons!\n"
-                            "1. Start a lobby with `/ludo` in a group chat.\n"
-                            "2. Other players click `➕ Join Lobby` (up to 4 players total). **Every player must first message the bot in private to register!**\n"
-                            "3. Host starts the game using `🚀 Start Game`.\n"
-                            "4. Take turns clicking `🎲 Roll Dice` to move 1-6 spaces.\n"
-                            "   - *Safe Zones* (Steps 0, 8, 15, 22): You cannot be kicked here.\n"
-                            "   - *Kicking*: Landing on an opponent resets them to 0 (unless they are on a Safe Zone).\n"
-                            "   - *Boost Shortcut*: Step 12 automatically launches you to Step 18.\n"
-                            "   - *Trap Net*: Step 25 pulls you backward to Step 10.\n"
-                            "5. Win: You must reach step 30 exactly. Winner gets `1,000 points`!"
-                        )
-                        send_message(token, chat_id, guide)
-                        continue
-
-
-
-                    # -------- LUDO --------
-                    if cmd == "ludo":
-                        ludo_cmd = args[0].lower() if args else "create"
-                        
-                        if ludo_cmd == "create":
-                            if chat_id in active_ludo_games:
-                                send_message(token, chat_id, "⚠️ A Ludo game lobby or active match is already running in this chat.")
-                                continue
-                            
-                            active_ludo_games[chat_id] = {
-                                "status": "lobby",
-                                "players": [sender_str],
-                                "player_names": {sender_str: first_name},
-                                "positions": {sender_str: 0},
-                                "colors": {},
-                                "turn_idx": 0,
-                                "last_roll": 0,
-                                "last_roller": None,
-                                "host_id": sender_str,
-                                "lobby_msg_id": None
-                            }
-                            
-                            lobby_text = (
-                                "🎲 *LUDO BOARD RACE - NEW LOBBY* 🎲\n"
-                                "-------------------------------------\n"
-                                f"Host: *{first_name}*\n\n"
-                                "👥 *Joined Players*:\n"
-                                f"1. *{first_name}*\n\n"
-                                "Waiting for players to join (2 to 4 players required). Click below to join!"
-                            )
-                            
-                            reply_markup = {
-                                "inline_keyboard": [
-                                    [
-                                        {"text": "➕ Join Lobby", "callback_data": f"ludo_join_{chat_id}"},
-                                        {"text": "🚀 Start Game", "callback_data": f"ludo_start_{chat_id}"}
-                                    ],
-                                    [
-                                        {"text": "❌ Cancel Game", "callback_data": f"ludo_cancel_{chat_id}"}
-                                    ]
-                                ]
-                            }
-                            
-                            url = f"https://api.telegram.org/bot{token}/sendMessage"
-                            data = {
-                                "chat_id": chat_id,
-                                "text": markdown_to_html(lobby_text),
-                                "parse_mode": "HTML",
-                                "reply_markup": json.dumps(reply_markup)
-                            }
-                            try:
-                                r = requests.post(url, data=data, timeout=10).json()
-                                lobby_msg_id = r.get("result", {}).get("message_id")
-                                active_ludo_games[chat_id]["lobby_msg_id"] = lobby_msg_id
-                            except Exception as e:
-                                print(f"Error starting ludo lobby: {e}")
-                                active_ludo_games.pop(chat_id, None)
-                                
-                        elif ludo_cmd == "join":
-                            if chat_id not in active_ludo_games:
-                                send_message(token, chat_id, "⚠️ No active Ludo lobby found in this chat. Start one with `/ludo`!")
-                                continue
-                            
-                            game = active_ludo_games[chat_id]
-                            if game["status"] != "lobby":
-                                send_message(token, chat_id, "⚠️ Game is already running!")
-                                continue
-                            
-                            if sender_str in game["players"]:
-                                send_message(token, chat_id, "⚠️ You have already joined this lobby!")
-                                continue
-                                
-                            if len(game["players"]) >= 4:
-                                send_message(token, chat_id, "⚠️ Lobby is full (max 4 players)!")
-                                continue
-                                
-                            game["players"].append(sender_str)
-                            game["player_names"][sender_str] = first_name
-                            game["positions"][sender_str] = 0
-                            
-                            player_list = "\n".join(f"{idx+1}. *{game['player_names'][p]}*" for idx, p in enumerate(game["players"]))
-                            lobby_text = (
-                                "🎲 *LUDO BOARD RACE - LOBBY* 🎲\n"
-                                "-------------------------------------\n"
-                                f"Host: *{game['player_names'][game['host_id']]}*\n\n"
-                                "👥 *Joined Players*:\n"
-                                f"{player_list}\n\n"
-                                "Click below to join!"
-                            )
-                            
-                            reply_markup = {
-                                "inline_keyboard": [
-                                    [
-                                        {"text": "➕ Join Lobby", "callback_data": f"ludo_join_{chat_id}"},
-                                        {"text": "🚀 Start Game", "callback_data": f"ludo_start_{chat_id}"}
-                                    ],
-                                    [
-                                        {"text": "❌ Cancel Game", "callback_data": f"ludo_cancel_{chat_id}"}
-                                    ]
-                                ]
-                            }
-                            
-                            url = f"https://api.telegram.org/bot{token}/editMessageText"
-                            data = {
-                                "chat_id": chat_id,
-                                "message_id": game["lobby_msg_id"],
-                                "text": markdown_to_html(lobby_text),
-                                "parse_mode": "HTML",
-                                "reply_markup": json.dumps(reply_markup)
-                            }
-                            try:
-                                requests.post(url, data=data, timeout=10)
-                            except:
-                                pass
-                                
-                        elif ludo_cmd == "start":
-                            if chat_id not in active_ludo_games:
-                                send_message(token, chat_id, "⚠️ No Ludo lobby to start. Create one with `/ludo`!")
-                                continue
-                            game = active_ludo_games[chat_id]
-                            if game["status"] != "lobby":
-                                continue
-                            if sender_str != game["host_id"]:
-                                send_message(token, chat_id, "⚠️ Only the host can start the game.")
-                                continue
-                            if len(game["players"]) < 2:
-                                send_message(token, chat_id, "⚠️ Need at least 2 players to start!")
-                                continue
-                                
-                            colors = ["🔴", "🔵", "🟢", "🟡"]
-                            for idx, p in enumerate(game["players"]):
-                                game["colors"][p] = colors[idx]
-                                game["positions"][p] = 0
-                            
-                            game["status"] = "playing"
-                            game["turn_idx"] = 0
-                            
-                            board_text = render_ludo_board(game)
-                            reply_markup = {
-                                "inline_keyboard": [
-                                    [
-                                        {"text": "🎲 Roll Dice", "callback_data": f"ludo_roll_{chat_id}"}
-                                    ]
-                                ]
-                            }
-                            
-                            url = f"https://api.telegram.org/bot{token}/editMessageText"
-                            data = {
-                                "chat_id": chat_id,
-                                "message_id": game["lobby_msg_id"],
-                                "text": markdown_to_html(board_text),
-                                "parse_mode": "HTML",
-                                "reply_markup": json.dumps(reply_markup)
-                            }
-                            try:
-                                requests.post(url, data=data, timeout=10)
-                            except:
-                                send_message(token, chat_id, board_text, reply_markup)
-                                
-                        elif ludo_cmd == "cancel":
-                            if chat_id not in active_ludo_games:
-                                continue
-                            game = active_ludo_games[chat_id]
-                            is_admin = is_user_group_admin(token, chat_id, sender_id, admin_id, user_data)
-                            if sender_str != game["host_id"] and not is_admin:
-                                send_message(token, chat_id, "⚠️ Only host or admins can cancel.")
-                                continue
-                            active_ludo_games.pop(chat_id)
-                            send_message(token, chat_id, "❌ Ludo game lobby has been cancelled.")
-                        continue
 
                     # -------- MODE COMMANDS --------
                     if cmd == "medusa":
@@ -2681,8 +1864,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             f"• *User Plan*: `{plan.upper()}` 💳\n"
                             f"• *Current Mode*: `{active_mode_display}`\n"
                             f"• *Medusa Mode Credits*: `{credit_info}`\n"
-                            f"• *Reset Timer*: `{reset_str}` ⏳\n"
-                            f"• *Wallet*: `{user_record.get('points', 500)} points` 💰\n\n"
+                            f"• *Reset Timer*: `{reset_str}` ⏳\n\n"
                             "*Daily Limit Usage*:\n"
                             f"• 🖼️ *Image Analyses*: `{img_status}`\n"
                             f"• 📄 *Doc Summaries*: `{sum_status}`\n"
@@ -2710,25 +1892,29 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                                 "   • Document Summary: 2 per day 📄\n"
                                 "   • Web Search: 4 per day 🔍\n"
                                 "   • Medusa Mode: 4 credits per day 🌟\n\n"
-                                "⭐ *Premium Plan* - $3 one-time\n"
+                                "⭐ *Premium Plan* - 150 Stars ($3 equivalent)\n"
                                 "   • Unlimited Chat (Default Mode)\n"
                                 "   • Image Analysis: 10 per day 🖼️\n"
                                 "   • Document Summary: 5 per day 📄\n"
                                 "   • Web Search: 10 per day 🔍\n"
                                 "   • Medusa Mode: 8 credits per day 🌟\n\n"
-                                "🔥 *Max Plan* - $10 one-time\n"
+                                "🔥 *Max Plan* - 500 Stars ($10 equivalent)\n"
                                 "   • Unlimited Chat (Default Mode)\n"
                                 "   • Image Analysis: 10 per day 🖼️\n"
                                 "   • Document Summary: 5 per day 📄\n"
                                 "   • Web Search: 10 per day 🔍\n"
                                 "   • Medusa Mode: 15 credits per day 🌟\n\n"
-                                "Select the plan below to request an upgrade from the Admin."
+                                "Select the plan below to pay directly using Telegram Stars (Fragment / In-app).\n\n"
+                                "💬 Support/Inquiries: Contact the owner at https://t.me/w4simg"
                             )
                             upgrade_btn = {
                                 "inline_keyboard": [
                                     [
-                                        {"text": "Request Premium Upgrade ($3)", "callback_data": "req_upg_premium"},
-                                        {"text": "Request Max Upgrade ($10)", "callback_data": "req_upg_max"}
+                                        {"text": "⭐ Buy Premium (150 Stars)", "callback_data": "pay_stars_premium"},
+                                        {"text": "🔥 Buy Max (500 Stars)", "callback_data": "pay_stars_max"}
+                                    ],
+                                    [
+                                        {"text": "🔗 Buy Stars on Fragment", "url": "https://fragment.com/stars"}
                                     ]
                                 ]
                             }
