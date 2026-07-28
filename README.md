@@ -71,19 +71,7 @@ Medusa is a private, fully-featured Telegram AI assistant. It handles text chat,
 - A Telegram Bot Token ([BotFather](https://t.me/BotFather))
 - Required API keys (contact owner)
 
-### Installation
 
-```bash
-# Clone the repository
-git clone <your-repo-url>
-cd medusa-bot
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the bot
-python Medusaa.py
-```
 
 ---
 
