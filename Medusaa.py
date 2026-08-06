@@ -1048,6 +1048,185 @@ def send_document(token, chat_id, file_name, file_content):
         return False
 
 
+def edit_message_text(token, chat_id, message_id, text, reply_markup=None):
+    url = f"https://api.telegram.org/bot{token}/editMessageText"
+    data = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": markdown_to_html(text),
+        "parse_mode": "HTML"
+    }
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup)
+    try:
+        r = requests.post(url, data=data, timeout=10)
+        return r.status_code == 200
+    except Exception as e:
+        print(f"Error editing message: {e}")
+        return False
+
+
+def summarize_document(token, chat_id, file_id, file_name, user_record, user_data, sender_str, session_key, cyberneurova_keys, gemini_keys, user_histories, active_mode):
+    send_typing(token, chat_id)
+    send_message(token, chat_id, f"⏳ Reading your document: *{file_name}*...")
+    
+    try:
+        # 1. getFile
+        file_info = requests.get(
+            f"https://api.telegram.org/bot{token}/getFile",
+            params={"file_id": file_id},
+            timeout=10
+        ).json()
+        file_path = file_info.get("result", {}).get("file_path")
+        
+        if file_path:
+            # 2. download
+            download_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+            file_bytes = requests.get(download_url, timeout=20).content
+            
+            # 3. parse based on extension
+            ext = file_name.split(".")[-1].lower() if "." in file_name else ""
+            doc_text = ""
+            if ext in ["txt", "csv", "json"]:
+                try:
+                    doc_text = file_bytes.decode("utf-8")
+                except Exception:
+                    doc_text = file_bytes.decode("latin-1", errors="ignore")
+            if ext == "pdf":
+                doc_text = extract_text_from_pdf(file_bytes)
+            elif ext == "docx":
+                doc_text = extract_text_from_docx(file_bytes)
+            else:
+                try:
+                    doc_text = file_bytes.decode("utf-8")
+                except Exception:
+                    doc_text = ""
+            
+            if doc_text.strip():
+                doc_context = f"[Document Context: User uploaded a file named '{file_name}' with contents:\n{doc_text[:15000]}\n(end of file context)]"
+                
+                summary_prompt = [
+                    {"role": "system", "content": build_system_prompt(user_record.get("preferences", {}))},
+                    {"role": "user", "content": f"Please provide a comprehensive summary of this document. Also note the format, size ({len(doc_text)} characters), and mention you are ready to answer any questions about it:\n\n{doc_context}"}
+                ]
+                
+                if active_mode == "medusa":
+                    reply = ask_medusa_with_failover(cyberneurova_keys, summary_prompt)
+                else:
+                    reply = ask_gemini_with_failover(gemini_keys, summary_prompt)
+                
+                # Extract pref tokens if any
+                pref_match = re.search(r"\[PREF:\s*(.*?)\]", reply)
+                if pref_match:
+                    pref_str = pref_match.group(1)
+                    for item in pref_str.split(","):
+                        if "=" in item:
+                            k, v = item.split("=", 1)
+                            user_record.setdefault("preferences", {})[k.strip().lower()] = v.strip()
+                    reply = re.sub(r"\[PREF:\s*(.*?)\]", "", reply).strip()
+                
+                # Initialize history
+                if session_key not in user_histories:
+                    saved_hist = user_record.get("history", [])
+                    user_histories[session_key] = saved_hist if saved_hist else [
+                        {"role": "system", "content": build_system_prompt(user_record.get("preferences", {}))}
+                    ]
+                
+                user_histories[session_key].append({"role": "system", "content": doc_context})
+                user_histories[session_key].append({"role": "assistant", "content": reply})
+                
+                user_record["history"] = user_histories[session_key]
+                user_record["summaries_today"] = user_record.get("summaries_today", 0) + 1
+                user_data[sender_str] = user_record
+                save_single_user(sender_str, user_record)
+                
+                send_message(token, chat_id, reply)
+            else:
+                send_message(token, chat_id, "⚠️ Could not read any text from the document. Please ensure it is not empty or scanned/image-only.")
+        else:
+            send_message(token, chat_id, "⚠️ Failed to fetch file path from Telegram.")
+    except Exception as e:
+        print(f"Error handling document: {e}")
+        send_message(token, chat_id, f"💥 *Error processing document*: {e}")
+
+
+def run_obfuscation_flow(token, chat_id, message_id, user_record, user_data, sender_str, level, style, admin_id):
+    pending = user_record.get("pending_file")
+    if not pending:
+        edit_message_text(token, chat_id, message_id, "❌ *Error: No pending file found.*")
+        return
+        
+    file_id = pending["file_id"]
+    file_name = pending["file_name"]
+    
+    try:
+        # 1. getFile
+        file_info = requests.get(
+            f"https://api.telegram.org/bot{token}/getFile",
+            params={"file_id": file_id},
+            timeout=10
+        ).json()
+        file_path = file_info.get("result", {}).get("file_path")
+        
+        if not file_path:
+            edit_message_text(token, chat_id, message_id, "❌ *Failed to get file path from Telegram.*")
+            return
+            
+        # 2. download
+        download_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+        file_bytes = requests.get(download_url, timeout=20).content
+        
+        try:
+            source_code = file_bytes.decode("utf-8")
+        except Exception:
+            source_code = file_bytes.decode("latin-1", errors="ignore")
+            
+        if not source_code.strip():
+            edit_message_text(token, chat_id, message_id, "⚠️ *The uploaded Python file is empty.*")
+            return
+            
+        # 3. run obscura obfuscation
+        import obscura
+        obfuscated_code, renamed, strings = obscura.obfuscate_source(
+            source_code=source_code,
+            level=level,
+            renaming_style=style
+        )
+        
+        # 4. send the obfuscated file as document
+        base_name, _ = os.path.splitext(file_name)
+        new_filename = f"{base_name}_obf.py"
+        
+        if send_document(token, chat_id, new_filename, obfuscated_code):
+            # 5. increment counts
+            user_record["obfuscations_today"] = user_record.get("obfuscations_today", 0) + 1
+            user_record["pending_file"] = None
+            user_data[sender_str] = user_record
+            save_single_user(sender_str, user_record)
+            
+            remaining = max(0, 5 - user_record["obfuscations_today"])
+            is_admin = (str(sender_str) == str(admin_id))
+            is_unltd = user_record.get("unlimited", False) or is_admin
+            rem_str = "Unlimited ♾️" if is_unltd else f"{remaining}/5"
+            
+            summary = (
+                "✅ *Obfuscation Complete!*\n\n"
+                f"• *File:* `{new_filename}`\n"
+                f"• *Level:* `{level.upper()}`\n"
+                f"• *Style:* `{style.capitalize()}`\n"
+                f"• *Identifiers Renamed:* `{renamed}`\n"
+                f"• *Strings Obfuscated:* `{strings}`\n\n"
+                f"📈 *Remaining Obfuscations Today:* `{rem_str}`"
+            )
+            edit_message_text(token, chat_id, message_id, summary)
+        else:
+            edit_message_text(token, chat_id, message_id, "💥 *Failed to send the obfuscated file back to you.*")
+            
+    except Exception as e:
+        print(f"Error in run_obfuscation_flow: {e}")
+        edit_message_text(token, chat_id, message_id, f"💥 *Obfuscation Failed:* `{str(e)}`")
+
+
 
 
 
@@ -1143,6 +1322,221 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                                 send_message(token, chat_id, f"⚠️ Failed to generate invoice: {r.json().get('description')}")
                         except Exception as e:
                             print(f"Exception sending Stars invoice: {e}")
+                        continue
+
+                    # -------- USER-INITIATED: Python Obfuscation callback actions --------
+                    if callback_data == "py_action_summarize":
+                        user_data = load_user_data()
+                        user_record = user_data.get(sender_str, {})
+                        pending = user_record.get("pending_file")
+                        if not pending:
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "No pending file found!"}
+                            )
+                            edit_message_text(token, chat_id, msg_id, "❌ *No pending file found or session expired.*")
+                            continue
+                            
+                        # Trigger document summary
+                        plan = user_record.get("plan", "free")
+                        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+                        is_admin = (str(sender_id) == str(admin_id))
+                        is_unltd = user_record.get("unlimited", False) or is_admin
+                        
+                        if not is_unltd and user_record.get("summaries_today", 0) >= limits["summaries"]:
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "Limit reached!"}
+                            )
+                            edit_message_text(
+                                token, chat_id, msg_id,
+                                f"⚠️ *Daily limit reached!* You have used all *{limits['summaries']}* document summaries for today on the *{plan.capitalize()}* plan.\n\n"
+                                f"Upgrade your plan or request a reset from Admin."
+                            )
+                            continue
+                        
+                        # Answer callback
+                        requests.post(
+                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                            data={"callback_query_id": callback_query["id"], "text": "Summarizing..."}
+                        )
+                        edit_message_text(token, chat_id, msg_id, f"📄 *Summarizing file:* `{pending['file_name']}`...")
+                        
+                        # Call summarize
+                        session_key = str(chat_id)
+                        summarize_document(
+                            token=token,
+                            chat_id=chat_id,
+                            file_id=pending["file_id"],
+                            file_name=pending["file_name"],
+                            user_record=user_record,
+                            user_data=user_data,
+                            sender_str=sender_str,
+                            session_key=session_key,
+                            cyberneurova_keys=cyberneurova_keys,
+                            gemini_keys=gemini_keys,
+                            user_histories=user_histories,
+                            active_mode=active_mode
+                        )
+                        # Clear pending file
+                        user_record["pending_file"] = None
+                        user_data[sender_str] = user_record
+                        save_single_user(sender_str, user_record)
+                        continue
+
+                    if callback_data == "py_action_obfuscate":
+                        user_data = load_user_data()
+                        user_record = user_data.get(sender_str, {})
+                        pending = user_record.get("pending_file")
+                        if not pending:
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "No pending file found!"}
+                            )
+                            edit_message_text(token, chat_id, msg_id, "❌ *No pending file found or session expired.*")
+                            continue
+                            
+                        # Check daily limit of 5 obfuscations
+                        obfuscations_used = user_record.get("obfuscations_today", 0)
+                        is_admin = (str(sender_id) == str(admin_id))
+                        is_unltd = user_record.get("unlimited", False) or is_admin
+                        
+                        if not is_unltd and obfuscations_used >= 5:
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "Limit reached!"}
+                            )
+                            edit_message_text(
+                                token, chat_id, msg_id,
+                                "⚠️ *Daily limit reached!* You have used all *5* python obfuscations for today."
+                            )
+                            continue
+                            
+                        requests.post(
+                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                            data={"callback_query_id": callback_query["id"], "text": "Level selection..."}
+                        )
+                        
+                        keyboard = {
+                            "inline_keyboard": [
+                                [
+                                    {"text": "1. Basic", "callback_data": "py_level_basic"},
+                                    {"text": "2. Medium", "callback_data": "py_level_medium"}
+                                ],
+                                [
+                                    {"text": "3. Strong", "callback_data": "py_level_strong"},
+                                    {"text": "4. Extreme", "callback_data": "py_level_extreme"}
+                                ],
+                                [
+                                    {"text": "❌ Cancel", "callback_data": "py_cancel"}
+                                ]
+                            ]
+                        }
+                        
+                        level_msg = (
+                            f"🔒 *Select Obfuscation Level for:* `{pending['file_name']}`\n\n"
+                            "• *Basic*: Strips comments/docstrings.\n"
+                            "• *Medium*: Strips comments, renames local variables, escapes strings.\n"
+                            "• *Strong*: Strips comments, renames globals/locals, XOR encrypts strings.\n"
+                            "• *Extreme*: Strong + control flow flattening + math obfuscation + builtin hiding."
+                        )
+                        edit_message_text(token, chat_id, msg_id, level_msg, reply_markup=keyboard)
+                        continue
+
+                    if callback_data.startswith("py_level_"):
+                        user_data = load_user_data()
+                        user_record = user_data.get(sender_str, {})
+                        pending = user_record.get("pending_file")
+                        if not pending:
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "No pending file found!"}
+                            )
+                            edit_message_text(token, chat_id, msg_id, "❌ *No pending file found or session expired.*")
+                            continue
+                            
+                        level = callback_data.split("py_level_")[1]
+                        pending["level"] = level
+                        user_record["pending_file"] = pending
+                        user_data[sender_str] = user_record
+                        save_single_user(sender_str, user_record)
+                        
+                        # Basic level doesn't need style selection because it doesn't rename anything.
+                        if level == "basic":
+                            # Proceed directly to obfuscation
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "Obfuscating..."}
+                            )
+                            edit_message_text(token, chat_id, msg_id, f"🔒 *Obfuscating file:* `{pending['file_name']}` (Level: `BASIC`)...")
+                            run_obfuscation_flow(token, chat_id, msg_id, user_record, user_data, sender_str, "basic", "hex", admin_id)
+                            continue
+                            
+                        # Other levels require style selection
+                        requests.post(
+                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                            data={"callback_query_id": callback_query["id"], "text": "Style selection..."}
+                        )
+                        
+                        keyboard = {
+                            "inline_keyboard": [
+                                [
+                                    {"text": "🎨 Hexadecimal (_0x1a)", "callback_data": "py_style_hex"},
+                                    {"text": "🎭 Confusing (lO1lIO)", "callback_data": "py_style_confusing"}
+                                ],
+                                [
+                                    {"text": "❌ Cancel", "callback_data": "py_cancel"}
+                                ]
+                            ]
+                        }
+                        
+                        style_msg = (
+                            f"🎨 *Select Identifier Renaming Style for:* `{pending['file_name']}`\n"
+                            f"Selected Level: `{level.upper()}`\n\n"
+                            "• *Hexadecimal*: Clean and standard hexadecimal variables (`_0x1a`)\n"
+                            "• *Confusing*: Variables named using hard-to-distinguish chars (`lO1lIO`)"
+                        )
+                        edit_message_text(token, chat_id, msg_id, style_msg, reply_markup=keyboard)
+                        continue
+
+                    if callback_data.startswith("py_style_"):
+                        user_data = load_user_data()
+                        user_record = user_data.get(sender_str, {})
+                        pending = user_record.get("pending_file")
+                        if not pending:
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "No pending file found!"}
+                            )
+                            edit_message_text(token, chat_id, msg_id, "❌ *No pending file found or session expired.*")
+                            continue
+                            
+                        style = callback_data.split("py_style_")[1]
+                        level = pending.get("level", "strong")
+                        
+                        requests.post(
+                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                            data={"callback_query_id": callback_query["id"], "text": "Obfuscating..."}
+                        )
+                        edit_message_text(
+                            token, chat_id, msg_id,
+                            f"🔒 *Obfuscating file:* `{pending['file_name']}` (Level: `{level.upper()}`, Style: `{style.upper()}`)..."
+                        )
+                        run_obfuscation_flow(token, chat_id, msg_id, user_record, user_data, sender_str, level, style, admin_id)
+                        continue
+
+                    if callback_data == "py_cancel":
+                        user_data = load_user_data()
+                        user_record = user_data.get(sender_str, {})
+                        user_record["pending_file"] = None
+                        user_data[sender_str] = user_record
+                        save_single_user(sender_str, user_record)
+                        
+                        requests.post(
+                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                            data={"callback_query_id": callback_query["id"], "text": "Action cancelled."}
+                        )
+                        edit_message_text(token, chat_id, msg_id, "❌ *Action cancelled by user.*")
                         continue
 
                     # Admin and Subadmin callbacks from here
@@ -1331,6 +1725,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             "images_today": 0,
                             "summaries_today": 0,
                             "searches_today": 0,
+                            "obfuscations_today": 0,
                             "last_reset_date": current_date_str,
                             "role": "user"
                         }
@@ -1353,6 +1748,9 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                     if "searches_today" not in user_record:
                         user_record["searches_today"] = 0
                         modified = True
+                    if "obfuscations_today" not in user_record:
+                        user_record["obfuscations_today"] = 0
+                        modified = True
                     if "last_reset_date" not in user_record:
                         user_record["last_reset_date"] = current_date_str
                         modified = True
@@ -1365,6 +1763,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         user_record["images_today"] = 0
                         user_record["summaries_today"] = 0
                         user_record["searches_today"] = 0
+                        user_record["obfuscations_today"] = 0
                         user_record["credits_used"] = 0
                         user_record["last_reset_date"] = current_date_str
                         modified = True
@@ -1384,6 +1783,34 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         is_admin = (str(sender_id) == str(admin_id))
                         is_unltd = user_record.get("unlimited", False) or is_admin
                         
+                        ext = file_name.split(".")[-1].lower() if "." in file_name else ""
+                        if ext == "py":
+                            # Save the file info to pending
+                            user_record["pending_file"] = {
+                                "file_id": file_id,
+                                "file_name": file_name,
+                                "timestamp": time.time()
+                            }
+                            user_data[sender_str] = user_record
+                            save_single_user(sender_str, user_record)
+                            
+                            keyboard = {
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "🔒 Obfuscate File", "callback_data": "py_action_obfuscate"},
+                                        {"text": "📄 Summarize File", "callback_data": "py_action_summarize"}
+                                    ]
+                                ]
+                            }
+                            send_message(
+                                token, chat_id,
+                                f"🐍 *Python File Detected:* `{file_name}`\n\n"
+                                f"What would you like to do with this file?",
+                                reply_markup=keyboard
+                            )
+                            continue
+
+                        # Check daily summaries limit for non-py documents
                         if not is_unltd and user_record.get("summaries_today", 0) >= limits["summaries"]:
                             send_message(
                                 token, chat_id,
@@ -1392,88 +1819,21 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             )
                             continue
                         
-                        send_typing(token, chat_id)
-                        send_message(token, chat_id, f"⏳ Reading your document: *{file_name}*...")
-                        
-                        try:
-                            # 1. getFile
-                            file_info = requests.get(
-                                f"https://api.telegram.org/bot{token}/getFile",
-                                params={"file_id": file_id},
-                                timeout=10
-                            ).json()
-                            file_path = file_info.get("result", {}).get("file_path")
-                            
-                            if file_path:
-                                # 2. download
-                                download_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
-                                file_bytes = requests.get(download_url, timeout=20).content
-                                
-                                # 3. parse based on extension
-                                ext = file_name.split(".")[-1].lower() if "." in file_name else ""
-                                doc_text = ""
-                                if ext in ["txt", "csv", "json"]:
-                                    try:
-                                        doc_text = file_bytes.decode("utf-8")
-                                    except Exception:
-                                        doc_text = file_bytes.decode("latin-1", errors="ignore")
-                                eloquence_text = ""
-                                if ext == "pdf":
-                                    doc_text = extract_text_from_pdf(file_bytes)
-                                elif ext == "docx":
-                                    doc_text = extract_text_from_docx(file_bytes)
-                                else:
-                                    try:
-                                        doc_text = file_bytes.decode("utf-8")
-                                    except Exception:
-                                        doc_text = ""
-                                
-                                if doc_text.strip():
-                                    doc_context = f"[Document Context: User uploaded a file named '{file_name}' with contents:\n{doc_text[:15000]}\n(end of file context)]"
-                                    
-                                    summary_prompt = [
-                                        {"role": "system", "content": build_system_prompt(user_record.get("preferences", {}))},
-                                        {"role": "user", "content": f"Please provide a comprehensive summary of this document. Also note the format, size ({len(doc_text)} characters), and mention you are ready to answer any questions about it:\n\n{doc_context}"}
-                                    ]
-                                    
-                                    if active_mode == "medusa":
-                                        reply = ask_medusa_with_failover(cyberneurova_keys, summary_prompt)
-                                    else:
-                                        reply = ask_gemini_with_failover(gemini_keys, summary_prompt)
-                                    
-                                    # Extract pref tokens if any
-                                    pref_match = re.search(r"\[PREF:\s*(.*?)\]", reply)
-                                    if pref_match:
-                                        pref_str = pref_match.group(1)
-                                        for item in pref_str.split(","):
-                                            if "=" in item:
-                                                k, v = item.split("=", 1)
-                                                user_record.setdefault("preferences", {})[k.strip().lower()] = v.strip()
-                                        reply = re.sub(r"\[PREF:\s*(.*?)\]", "", reply).strip()
-                                    
-                                    # Initialize history
-                                    if session_key not in user_histories:
-                                        saved_hist = user_record.get("history", [])
-                                        user_histories[session_key] = saved_hist if saved_hist else [
-                                            {"role": "system", "content": build_system_prompt(user_record.get("preferences", {}))}
-                                        ]
-                                    
-                                    user_histories[session_key].append({"role": "system", "content": doc_context})
-                                    user_histories[session_key].append({"role": "assistant", "content": reply})
-                                    
-                                    user_record["history"] = user_histories[session_key]
-                                    user_record["summaries_today"] = user_record.get("summaries_today", 0) + 1
-                                    user_data[sender_str] = user_record
-                                    save_user_data(user_data)
-                                    
-                                    send_message(token, chat_id, reply)
-                                else:
-                                    send_message(token, chat_id, "⚠️ Could not read any text from the document. Please ensure it is not empty or scanned/image-only.")
-                            else:
-                                send_message(token, chat_id, "⚠️ Failed to fetch file path from Telegram.")
-                        except Exception as e:
-                            print(f"Error handling document: {e}")
-                            send_message(token, chat_id, f"💥 *Error processing document*: {e}")
+                        session_key = str(chat_id)
+                        summarize_document(
+                            token=token,
+                            chat_id=chat_id,
+                            file_id=file_id,
+                            file_name=file_name,
+                            user_record=user_record,
+                            user_data=user_data,
+                            sender_str=sender_str,
+                            session_key=session_key,
+                            cyberneurova_keys=cyberneurova_keys,
+                            gemini_keys=gemini_keys,
+                            user_histories=user_histories,
+                            active_mode=active_mode
+                        )
                         continue
 
                     # -------- PHOTO MESSAGE --------
@@ -2117,27 +2477,23 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         user_data[sender_str] = user_record
                         save_user_data(user_data)
 
-                    # -------- AUTO BROWSER SEARCH / AUTO DETECTION --------
+                    # -------- BROWSER SEARCH (IF TOGGLED ON) --------
                     custom_context = ""
                     should_search = search_modes.get(chat_id, False)
-                    
-                    if not should_search:
-                        # Automatically check if the query requires real-time search
-                        should_search = needs_web_search(groq_keys, gemini_keys, text)
-                        if should_search:
-                            plan = user_record.get("plan", "free")
-                            limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
-                            is_admin = (sender_str == str(admin_id))
-                            is_unltd = user_record.get("unlimited", False) or is_admin
-                            
-                            if not is_unltd and user_record.get("searches_today", 0) >= limits["searches"]:
-                                send_message(
-                                    token, chat_id,
-                                    f"⚠️ *Daily limit reached!* Auto-detect skipped search as you have used all *{limits['searches']}* web searches for today on the *{plan.capitalize()}* plan."
-                                )
-                                should_search = False
-                            else:
-                                send_message(token, chat_id, f"🔍 *Auto-detected need for real-time info. Searching for:* `{text}`...")
+                    if should_search:
+                        plan = user_record.get("plan", "free")
+                        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+                        is_admin = (sender_str == str(admin_id))
+                        is_unltd = user_record.get("unlimited", False) or is_admin
+                        
+                        if not is_unltd and user_record.get("searches_today", 0) >= limits["searches"]:
+                            send_message(
+                                token, chat_id,
+                                f"⚠️ *Daily limit reached!* Skipping search as you have used all *{limits['searches']}* web searches for today on the *{plan.capitalize()}* plan."
+                            )
+                            should_search = False
+                        else:
+                            send_message(token, chat_id, f"🔍 *Searching for:* `{text}`...")
                             
                     if should_search:
                         print(f"Auto-searching web for user query: {text}")

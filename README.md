@@ -52,9 +52,10 @@ Medusa is a private, fully-featured Telegram AI assistant. It handles text chat,
 | 🧠 **Uncensored AI Chat** | No filters, no restrictions. Ask anything. |
 | 🌟 **Medusa Mode** | Premium AI mode with higher intelligence and deeper responses |
 | 🔓 **Default Mode** | Unlimited casual chat |
+| 🔒 **Python Obfuscator** | Upload a `.py` file to obfuscate it with custom levels/styles. Limit: 5/day. |
 | 🖼️ **Image Analysis** | Send any photo and get a detailed AI breakdown |
-| 📄 **Document Reading** | Send PDFs, DOCX, or TXT files for AI-powered summaries |
-| 🔍 **Web Search** | Toggle live web search for up-to-date answers |
+| 📄 **Document Reading** | Send PDFs, DOCX, TXT, or PY files for summaries |
+| 🔍 **Web Search** | Manual web search support for real-time up-to-date answers |
 | 🎭 **Mood Control** | Switch between `normal` (charming) or `angry` (dominant) personality |
 | 🌡️ **Temperature Control** | Adjust AI creativity from 0.1 (focused) to 1.0 (chaotic) |
 | 💳 **Upgrade via Stars** | Pay with Telegram Stars to unlock higher limits |
@@ -100,7 +101,7 @@ python Medusaa.py
 | `/check` | View your plan, credits & daily usage |
 | `/upgrade` | Upgrade your plan using Telegram Stars |
 | `/clear` | Reset your conversation history |
-| `/search` | Toggle automatic web search mode |
+| `/search` | Toggle web search mode or search manually (`/search <query>`) |
 | `/mood <normal\|angry>` | Change the bot's personality |
 | `/temp <0.1–1.0>` | Adjust AI creativity level |
 
