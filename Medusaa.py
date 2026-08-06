@@ -849,7 +849,8 @@ def set_bot_commands(token, admin_id, user_data=None):
         {"command": "clear", "description": "Clear your conversation history 🧹"},
         {"command": "search", "description": "Toggle web search 🔍"},
         {"command": "medusa", "description": "Switch to Premium Mode 🌟"},
-        {"command": "default", "description": "Switch to Default Mode 🔓"}
+        {"command": "default", "description": "Switch to Default Mode 🔓"},
+        {"command": "enc", "description": "Obfuscate Python file 🔒"}
     ]
     
     bot_admin_cmds = default_cmds + [
@@ -2061,7 +2062,8 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             "• `/medusa` - Switch to Premium Mode 🌟\n"
                             "• `/check` - Check mode and limits 📊\n"
                             "• `/clear` - Reset your conversation history 🧹\n"
-                            "• `/search` - Toggle automatic web search mode 🔍\n"
+                            "• `/search` - Toggle web search mode 🔍\n"
+                            "• `/enc` - Reply to a `.py` file to obfuscate it 🔒\n"
                             "• `/mood <normal|angry>` - Adjust mood 🎭\n"
                             "• `/temp <0.1-1.0>` - Adjust creativity 🌡️"
                         )
@@ -2135,7 +2137,75 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         send_message(token, chat_id, info_card)
                         continue
 
-
+                    # -------- OBFUSCATE COMMAND (/enc) --------
+                    if cmd == "enc":
+                        # Check if it's a reply to a message with a document
+                        replied_msg = message.get("reply_to_message")
+                        if not replied_msg or "document" not in replied_msg:
+                            send_message(
+                                token, chat_id,
+                                "⚠️ *Usage:* Reply to a Python (`.py`) document with `/enc` to start obfuscating it."
+                            )
+                            continue
+                            
+                        doc = replied_msg["document"]
+                        file_id = doc["file_id"]
+                        file_name = doc.get("file_name", "document")
+                        
+                        ext = file_name.split(".")[-1].lower() if "." in file_name else ""
+                        if ext != "py":
+                            send_message(
+                                token, chat_id,
+                                "⚠️ *Invalid File:* The replied file must be a Python (`.py`) script."
+                            )
+                            continue
+                            
+                        # Check daily limit of 5 obfuscations
+                        obfuscations_used = user_record.get("obfuscations_today", 0)
+                        is_admin = (str(sender_id) == str(admin_id))
+                        is_unltd = user_record.get("unlimited", False) or is_admin
+                        
+                        if not is_unltd and obfuscations_used >= 5:
+                            send_message(
+                                token, chat_id,
+                                "⚠️ *Daily limit reached!* You have used all *5* python obfuscations for today."
+                            )
+                            continue
+                            
+                        # Save the file info to pending
+                        user_record["pending_file"] = {
+                            "file_id": file_id,
+                            "file_name": file_name,
+                            "timestamp": time.time()
+                        }
+                        user_data[sender_str] = user_record
+                        save_single_user(sender_str, user_record)
+                        
+                        keyboard = {
+                            "inline_keyboard": [
+                                [
+                                    {"text": "1. Basic", "callback_data": "py_level_basic"},
+                                    {"text": "2. Medium", "callback_data": "py_level_medium"}
+                                ],
+                                [
+                                    {"text": "3. Strong", "callback_data": "py_level_strong"},
+                                    {"text": "4. Extreme", "callback_data": "py_level_extreme"}
+                                ],
+                                [
+                                    {"text": "❌ Cancel", "callback_data": "py_cancel"}
+                                ]
+                            ]
+                        }
+                        
+                        level_msg = (
+                            f"🔒 *Select Obfuscation Level for:* `{file_name}`\n\n"
+                            "• *Basic*: Strips comments/docstrings.\n"
+                            "• *Medium*: Strips comments, renames local variables, escapes strings.\n"
+                            "• *Strong*: Strips comments, renames globals/locals, XOR encrypts strings.\n"
+                            "• *Extreme*: Strong + control flow flattening + math obfuscation + builtin hiding."
+                        )
+                        send_message(token, chat_id, level_msg, reply_markup=keyboard)
+                        continue
 
                     # -------- MODE COMMANDS --------
                     if cmd == "medusa":

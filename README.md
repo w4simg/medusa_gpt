@@ -81,6 +81,7 @@ Medusa is a private, fully-featured Telegram AI assistant. It handles text chat,
 | `/upgrade` | Upgrade your plan using Telegram Stars |
 | `/clear` | Reset your conversation history |
 | `/search` | Toggle web search mode or search manually (`/search <query>`) |
+| `/enc` | Reply to a `.py` file to start interactive obfuscation 🔒 |
 | `/mood <normal\|angry>` | Change the bot's personality |
 | `/temp <0.1–1.0>` | Adjust AI creativity level |
 
