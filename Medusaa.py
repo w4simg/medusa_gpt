@@ -2686,6 +2686,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                                 {"role": "user", "content": search_query}
                             ]
                             
+                            send_typing(token, chat_id)
                             try:
                                 if active_mode == "medusa":
                                     reply = ask_medusa_with_failover(cyberneurova_keys, temp_messages)
@@ -2817,6 +2818,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                     if len(user_histories[session_key]) > 16:
                         user_histories[session_key] = [user_histories[session_key][0]] + user_histories[session_key][-15:]
 
+                    send_typing(token, chat_id)
                     try:
                         if active_mode == "medusa":
                             reply = ask_medusa_with_failover(cyberneurova_keys, user_histories[session_key])

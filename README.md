@@ -66,6 +66,18 @@ Medusa is a private, fully-featured Telegram AI assistant. It handles text chat,
 
 ---
 
+## 🛠️ Recent Fixes & Improvements
+
+- 🎨 **AI Image Generation (`/image <prompt>`)**: High-quality AI image generation with 9 live filter buttons (`Cyberpunk`, `Anime`, `Cinematic`, `Fantasy`, `Watercolor`, `Realistic`, `3D Render`, `Vintage`, `Original`) that update photos in-place live on Telegram.
+- 💳 **Tier Quota Management**: Enforced daily limits for image generations across plans:
+  - **Free Plan**: 5 image generations / day
+  - **Premium Plan**: 20 image generations / day
+  - **Max Plan**: Unlimited image generations
+- 🔒 **Provider Privacy**: Custom engine branding (`Medusa Image AI v3.5`) hiding third-party provider details.
+- ✍️ **Telegram Typing Indicator Fix**: Added instant Telegram `typing...` action status indicator for all incoming chat messages and search queries.
+
+---
+
 
 
 ## 💬 Bot Commands
