@@ -52,6 +52,7 @@ Medusa is a private, fully-featured Telegram AI assistant. It handles text chat,
 | 🧠 **Uncensored AI Chat** | No filters, no restrictions. Ask anything. |
 | 🌟 **Medusa Mode** | Premium AI mode with higher intelligence and deeper responses |
 | 🔓 **Default Mode** | Unlimited casual chat |
+| 🎨 **AI Image Generation** | Generate AI images (`/image <prompt>`) with live filter buttons (Cyberpunk, Anime, Cinematic, etc.). Limits: Free 5/day, Premium 20/day, Max Unlimited. |
 | 🔒 **Python Obfuscator** | Upload a `.py` file to obfuscate it with custom levels/styles. Limit: 5/day. |
 | 🖼️ **Image Analysis** | Send any photo and get a detailed AI breakdown |
 | 📄 **Document Reading** | Send PDFs, DOCX, TXT, or PY files for summaries |
@@ -75,6 +76,7 @@ Medusa is a private, fully-featured Telegram AI assistant. It handles text chat,
 |---|---|
 | `/start` | Wake up the bot & view your profile |
 | `/help` | Show all available commands |
+| `/image <prompt>` | Generate AI image with inline live filter buttons 🖼️ |
 | `/medusa` | Switch to Premium AI Mode 🌟 |
 | `/default` | Switch to Default Mode (Unlimited) 🔓 |
 | `/check` | View your plan, credits & daily usage |

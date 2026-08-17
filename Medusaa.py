@@ -82,6 +82,9 @@ requests.post = requests_post_retry
 AUTHOR = "Arthur"
 VERSION = "2.0.0"
 
+IMAGE_ENGINE_NAME = "Medusa Image AI"
+IMAGE_ENGINE_VERSION = "v3.5"
+
 TEMPERATURE = 0.6
 MOOD = "normal"
 RUNNING = True
@@ -90,22 +93,40 @@ PLAN_LIMITS = {
     "free": {
         "medusa_credits": 4,
         "images": 3,
+        "image_gen": 5,
         "summaries": 2,
         "searches": 4
     },
     "premium": {
         "medusa_credits": 8,
         "images": 10,
+        "image_gen": 20,
         "summaries": 5,
         "searches": 10
     },
     "max": {
         "medusa_credits": 15,
         "images": 10,
+        "image_gen": 999999,
         "summaries": 5,
         "searches": 10
     }
 }
+
+FILTER_STYLES = {
+    "original": {"name": "Original 🔄", "prompt_suffix": ""},
+    "cyberpunk": {"name": "Cyberpunk 🎨", "prompt_suffix": ", cyberpunk style, neon lighting, vibrant high-contrast colors, futuristic city background, detailed"},
+    "anime": {"name": "Anime 🌸", "prompt_suffix": ", beautiful anime style, studio ghibli aesthetic, vibrant colors, detailed cel shading, 8k resolution"},
+    "cinematic": {"name": "Cinematic 🎬", "prompt_suffix": ", cinematic movie still, dramatic studio lighting, 8k resolution, shallow depth of field, masterpiece"},
+    "fantasy": {"name": "Fantasy 🧙", "prompt_suffix": ", dark fantasy art style, epic magical atmosphere, intricate details, mythical, unreal engine 5 render"},
+    "watercolor": {"name": "Watercolor 🖌️", "prompt_suffix": ", soft watercolor painting, artistic paint splashes, gentle brush strokes, pastel colors"},
+    "realistic": {"name": "Realistic 📸", "prompt_suffix": ", hyperrealistic 8k photo, DSLR quality, sharp focus, natural lighting, ultra-detailed textures"},
+    "render3d": {"name": "3D Render ✨", "prompt_suffix": ", 3d octane render, smooth textures, raytracing reflection, vibrant lighting, Pixar style detail"},
+    "vintage": {"name": "Vintage 🖤", "prompt_suffix": ", 1970s retro vintage photograph, film grain, muted warm tones, classic aesthetic, analog photo"}
+}
+
+IMAGE_SESSIONS = {}
+
 
 
 # =================================
@@ -844,6 +865,7 @@ def set_bot_commands(token, admin_id, user_data=None):
     default_cmds = [
         {"command": "start", "description": "Wake up Medusa 🐍"},
         {"command": "help", "description": "Show list of commands ℹ️"},
+        {"command": "image", "description": "Generate AI image 🖼️"},
         {"command": "upgrade", "description": "Upgrade your plan with Stars 🚀"},
         {"command": "check", "description": "Check current mode and limits 📊"},
         {"command": "clear", "description": "Clear your conversation history 🧹"},
@@ -1067,6 +1089,91 @@ def edit_message_text(token, chat_id, message_id, text, reply_markup=None):
         return False
 
 
+def send_photo_bytes(token, chat_id, image_bytes, caption, reply_markup=None):
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    files = {"photo": ("image.jpg", io.BytesIO(image_bytes), "image/jpeg")}
+    data = {
+        "chat_id": chat_id,
+        "caption": markdown_to_html(caption),
+        "parse_mode": "HTML"
+    }
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup)
+    try:
+        r = requests.post(url, data=data, files=files, timeout=35)
+        if r.status_code == 200:
+            return r.json().get("result", {})
+        else:
+            print(f"Error sending photo: {r.text}")
+            return None
+    except Exception as e:
+        print(f"Error sending photo: {e}")
+        return None
+
+
+def edit_message_media_bytes(token, chat_id, message_id, image_bytes, caption, reply_markup=None):
+    url = f"https://api.telegram.org/bot{token}/editMessageMedia"
+    media_obj = {
+        "type": "photo",
+        "media": "attach://photo",
+        "caption": markdown_to_html(caption),
+        "parse_mode": "HTML"
+    }
+    data = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "media": json.dumps(media_obj)
+    }
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup)
+    files = {"photo": ("image.jpg", io.BytesIO(image_bytes), "image/jpeg")}
+    try:
+        r = requests.post(url, data=data, files=files, timeout=35)
+        return r.status_code == 200
+    except Exception as e:
+        print(f"Error editing message media: {e}")
+        return False
+
+
+def generate_image_bytes(prompt, filter_key="original"):
+    filter_info = FILTER_STYLES.get(filter_key, FILTER_STYLES["original"])
+    full_prompt = prompt.strip() + filter_info["prompt_suffix"]
+    encoded_prompt = urllib.parse.quote(full_prompt)
+    seed = int(time.time() * 1000) % 1000000
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    r = requests.get(url, headers=headers, timeout=45)
+    if r.status_code != 200:
+        raise Exception(f"Failed to generate image (Status Code: {r.status_code})")
+    return r.content
+
+
+def build_image_filter_keyboard(session_id, active_filter="original"):
+    buttons = [
+        [
+            {"text": f"{'✅ ' if active_filter == 'cyberpunk' else ''}🎨 Cyberpunk", "callback_data": f"imgflt:cyberpunk:{session_id}"},
+            {"text": f"{'✅ ' if active_filter == 'anime' else ''}🌸 Anime", "callback_data": f"imgflt:anime:{session_id}"},
+            {"text": f"{'✅ ' if active_filter == 'cinematic' else ''}🎬 Cinematic", "callback_data": f"imgflt:cinematic:{session_id}"}
+        ],
+        [
+            {"text": f"{'✅ ' if active_filter == 'fantasy' else ''}🧙 Fantasy", "callback_data": f"imgflt:fantasy:{session_id}"},
+            {"text": f"{'✅ ' if active_filter == 'watercolor' else ''}🖌️ Watercolor", "callback_data": f"imgflt:watercolor:{session_id}"},
+            {"text": f"{'✅ ' if active_filter == 'realistic' else ''}📸 Realistic", "callback_data": f"imgflt:realistic:{session_id}"}
+        ],
+        [
+            {"text": f"{'✅ ' if active_filter == 'render3d' else ''}✨ 3D Render", "callback_data": f"imgflt:render3d:{session_id}"},
+            {"text": f"{'✅ ' if active_filter == 'vintage' else ''}🖤 Vintage", "callback_data": f"imgflt:vintage:{session_id}"},
+            {"text": f"{'✅ ' if active_filter == 'original' else ''}🔄 Original", "callback_data": f"imgflt:original:{session_id}"}
+        ]
+    ]
+    return {"inline_keyboard": buttons}
+
+
+
 def summarize_document(token, chat_id, file_id, file_name, user_record, user_data, sender_str, session_key, cyberneurova_keys, gemini_keys, user_histories, active_mode):
     send_typing(token, chat_id)
     send_message(token, chat_id, f"⏳ Reading your document: *{file_name}*...")
@@ -1281,6 +1388,45 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                     callback_data = callback_query.get("data", "")
                     sender_id = callback_query["from"]["id"]
                     msg_id = callback_query["message"]["message_id"]
+
+                    # -------- USER-INITIATED: Live Image Filter Callback --------
+                    if callback_data.startswith("imgflt:"):
+                        parts = callback_data.split(":", 2)
+                        if len(parts) == 3:
+                            filter_key = parts[1]
+                            session_id = parts[2]
+                            session = IMAGE_SESSIONS.get(session_id)
+                            if not session:
+                                requests.post(
+                                    f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                    data={"callback_query_id": callback_query["id"], "text": "Image session expired."}
+                                )
+                                continue
+                            
+                            filter_info = FILTER_STYLES.get(filter_key, FILTER_STYLES["original"])
+                            filter_name = filter_info["name"]
+                            
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": f"Applying filter: {filter_name}..."}
+                            )
+                            
+                            prompt = session["prompt"]
+                            session["active_filter"] = filter_key
+                            
+                            try:
+                                new_bytes = generate_image_bytes(prompt, filter_key)
+                                caption = (
+                                    f"🖼️ *{IMAGE_ENGINE_NAME} {IMAGE_ENGINE_VERSION}*\n"
+                                    f"• *Prompt:* `{prompt}`\n"
+                                    f"• *Filter:* `{filter_name}`"
+                                )
+                                new_keyboard = build_image_filter_keyboard(session_id, filter_key)
+                                edit_message_media_bytes(token, chat_id, msg_id, new_bytes, caption, reply_markup=new_keyboard)
+                            except Exception as e:
+                                print(f"Error applying image filter: {e}")
+                                send_message(token, chat_id, f"💥 *Failed to apply filter:* {e}")
+                        continue
 
                     # -------- USER-INITIATED: Request credit reset (non-admin) --------
                     if callback_data.startswith("reqreset_") and str(sender_id) != str(admin_id):
@@ -1724,6 +1870,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             "history": [],
                             "plan": "free",
                             "images_today": 0,
+                            "image_gen_today": 0,
                             "summaries_today": 0,
                             "searches_today": 0,
                             "obfuscations_today": 0,
@@ -1742,6 +1889,9 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         modified = True
                     if "images_today" not in user_record:
                         user_record["images_today"] = 0
+                        modified = True
+                    if "image_gen_today" not in user_record:
+                        user_record["image_gen_today"] = 0
                         modified = True
                     if "summaries_today" not in user_record:
                         user_record["summaries_today"] = 0
@@ -1762,6 +1912,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                     # Handle daily reset check
                     if user_record.get("last_reset_date", "") != current_date_str:
                         user_record["images_today"] = 0
+                        user_record["image_gen_today"] = 0
                         user_record["summaries_today"] = 0
                         user_record["searches_today"] = 0
                         user_record["obfuscations_today"] = 0
@@ -2051,12 +2202,72 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             send_message(token, chat_id, "💥 Failed to export and send data document.")
                         continue
 
+                    # -------- IMAGE GENERATION COMMAND --------
+                    if cmd == "image":
+                        if not args_str.strip():
+                            send_message(
+                                token, chat_id,
+                                "🎨 *Medusa Image Generator*\n\n"
+                                "Usage: `/image <description of image>`\n"
+                                "Example: `/image a majestic dragon flying over neon cyberpunk cityscape`"
+                            )
+                            continue
+                            
+                        plan = user_record.get("plan", "free")
+                        limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+                        is_admin = (str(sender_id) == str(admin_id))
+                        is_unltd = user_record.get("unlimited", False) or is_admin
+                        
+                        img_gen_used = user_record.get("image_gen_today", 0)
+                        max_allowed = limits.get("image_gen", 5)
+                        
+                        if not is_unltd and img_gen_used >= max_allowed:
+                            send_message(
+                                token, chat_id,
+                                f"⚠️ *Daily limit reached!* You have used all *{max_allowed}* image generations for today on the *{plan.capitalize()}* plan.\n\n"
+                                f"Upgrade your plan (`/upgrade`) or request a reset from Admin."
+                            )
+                            continue
+                            
+                        send_typing(token, chat_id)
+                        send_message(token, chat_id, f"🎨 *Generating image:* `{args_str}`...")
+                        
+                        try:
+                            img_bytes = generate_image_bytes(args_str, "original")
+                            
+                            # Increment count
+                            user_record["image_gen_today"] = img_gen_used + 1
+                            user_data[sender_str] = user_record
+                            save_single_user(sender_str, user_record)
+                            
+                            session_id = f"{sender_id}_{int(time.time()) % 100000}"
+                            IMAGE_SESSIONS[session_id] = {
+                                "prompt": args_str,
+                                "active_filter": "original",
+                                "chat_id": chat_id,
+                                "user_id": sender_id
+                            }
+                            
+                            caption = (
+                                f"🖼️ *{IMAGE_ENGINE_NAME} {IMAGE_ENGINE_VERSION}*\n"
+                                f"• *Prompt:* `{args_str}`\n"
+                                f"• *Filter:* `Original 🔄`"
+                            )
+                            reply_markup = build_image_filter_keyboard(session_id, "original")
+                            send_photo_bytes(token, chat_id, img_bytes, caption, reply_markup=reply_markup)
+                        except Exception as e:
+                            print(f"Error generating image: {e}")
+                            send_message(token, chat_id, f"💥 *Error generating image:* {e}")
+                            
+                        continue
+
                     # -------- HELP --------
                     if cmd == "help":
                         commands = (
                             "🐍 *Medusa Bot Commands*:\n"
                             "• `/start` - Wake up the bot\n"
                             "• `/help` - Show this help menu\n"
+                            "• `/image <prompt>` - Generate AI image 🖼️\n"
                             "• `/upgrade` - Upgrade your plan using Telegram Stars 🚀\n"
                             "• `/default` - Switch to Default Mode 🔓\n"
                             "• `/medusa` - Switch to Premium Mode 🌟\n"
@@ -2252,17 +2463,21 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
                         
                         img_used = user_record.get("images_today", 0)
+                        img_gen_used = user_record.get("image_gen_today", 0)
                         sum_used = user_record.get("summaries_today", 0)
                         search_used = user_record.get("searches_today", 0)
                         
                         is_unltd = user_record.get("unlimited", False) or (sender_str == str(admin_id))
                         
+                        max_gen = limits.get("image_gen", 5)
                         if is_unltd:
                             img_status = "Unlimited ♾️"
+                            img_gen_status = "Unlimited ♾️"
                             sum_status = "Unlimited ♾️"
                             search_status = "Unlimited ♾️"
                         else:
                             img_status = f"{img_used}/{limits['images']}"
+                            img_gen_status = f"{img_gen_used}/{max_gen}" if max_gen < 900000 else "Unlimited ♾️"
                             sum_status = f"{sum_used}/{limits['summaries']}"
                             search_status = f"{search_used}/{limits['searches']}"
                             
@@ -2296,6 +2511,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             f"• *Medusa Mode Credits*: `{credit_info}`\n"
                             f"• *Reset Timer*: `{reset_str}` ⏳\n\n"
                             "*Daily Limit Usage*:\n"
+                            f"• 🎨 *Image Generations*: `{img_gen_status}`\n"
                             f"• 🖼️ *Image Analyses*: `{img_status}`\n"
                             f"• 📄 *Doc Summaries*: `{sum_status}`\n"
                             f"• 🔍 *Web Searches*: `{search_status}`\n\n"
@@ -2318,18 +2534,21 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                                 "================================\n\n"
                                 "🔓 *Free Plan* - $0\n"
                                 "   • Unlimited Chat (Default Mode)\n"
+                                "   • Image Generation: 5 per day 🎨\n"
                                 "   • Image Analysis: 3 per day 🖼️\n"
                                 "   • Document Summary: 2 per day 📄\n"
                                 "   • Web Search: 4 per day 🔍\n"
                                 "   • Medusa Mode: 4 credits per day 🌟\n\n"
                                 "⭐ *Premium Plan* - 150 Stars ($3 equivalent)\n"
                                 "   • Unlimited Chat (Default Mode)\n"
+                                "   • Image Generation: 20 per day 🎨\n"
                                 "   • Image Analysis: 10 per day 🖼️\n"
                                 "   • Document Summary: 5 per day 📄\n"
                                 "   • Web Search: 10 per day 🔍\n"
                                 "   • Medusa Mode: 8 credits per day 🌟\n\n"
                                 "🔥 *Max Plan* - 500 Stars ($10 equivalent)\n"
                                 "   • Unlimited Chat (Default Mode)\n"
+                                "   • Image Generation: Unlimited 🎨\n"
                                 "   • Image Analysis: 10 per day 🖼️\n"
                                 "   • Document Summary: 5 per day 📄\n"
                                 "   • Web Search: 10 per day 🔍\n"
