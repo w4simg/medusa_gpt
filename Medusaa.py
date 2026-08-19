@@ -1271,8 +1271,8 @@ def send_fsub_notice(token, chat_id, missing_channels, first_name="User"):
     reply_markup = {"inline_keyboard": buttons}
 
     notice_text = (
-        f"Hey <b>{html.escape(first_name)}</b>\n\n"
-        "<i>Please Join All My Update Channels To Use Me!</i>"
+        f"Hey *{first_name}*\n\n"
+        "_Please Join All My Update Channels To Use Me!_"
     )
 
     images = get_start_images()
@@ -1588,6 +1588,33 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
 
             for update in data.get("result", []):
                 last_update = update["update_id"]
+
+                # -------- AUTOMATED CHAT JOIN REQUEST APPROVAL --------
+                if "chat_join_request" in update:
+                    join_req = update["chat_join_request"]
+                    c_id = join_req["chat"]["id"]
+                    u_id = join_req["from"]["id"]
+                    u_name = join_req["from"].get("first_name", "User")
+                    chat_title = join_req["chat"].get("title", "Channel/Group")
+
+                    try:
+                        appr_resp = requests.post(
+                            f"https://api.telegram.org/bot{token}/approveChatJoinRequest",
+                            data={"chat_id": c_id, "user_id": u_id},
+                            timeout=10
+                        )
+                        if appr_resp.status_code == 200 and appr_resp.json().get("ok"):
+                            print(f"🟢 Auto-approved join request for {u_name} in {chat_title} ({c_id})")
+                            try:
+                                welcome_pm = f"🎉 *Welcome to {chat_title}!*\nYour join request has been automatically approved. You can now use Medusa AI!"
+                                send_message(token, u_id, welcome_pm)
+                            except Exception:
+                                pass
+                        else:
+                            print(f"🔴 Failed to approve join request: {appr_resp.text}")
+                    except Exception as err:
+                        print(f"Error approving join request: {err}")
+                    continue
 
                 # -------- AUTOMATED PRE-CHECKOUT QUERY RESPONSE --------
                 if "pre_checkout_query" in update:
