@@ -7,6 +7,7 @@ import sys
 import io
 import html
 import signal
+import random
 import certifi
 from datetime import datetime
 from colorama import Fore, init
@@ -878,7 +879,8 @@ def set_bot_commands(token, admin_id, user_data=None):
     bot_admin_cmds = default_cmds + [
         {"command": "admin", "description": "Access Admin Dashboard 👑"},
         {"command": "subadmin", "description": "Promote/demote subadmins 🛠️"},
-        {"command": "export", "description": "Export target user profile 📤"}
+        {"command": "export", "description": "Export target user profile 📤"},
+        {"command": "broadcast", "description": "Broadcast message to all users 📢"}
     ]
     
     try:
@@ -1109,6 +1111,164 @@ def send_photo_bytes(token, chat_id, image_bytes, caption, reply_markup=None):
     except Exception as e:
         print(f"Error sending photo: {e}")
         return None
+
+
+DEFAULT_START_IMAGES = [
+    "https://images.wallpapersden.com/image/download/anime-girl-stylish-digital-art_bW1lZm6UmZqaraWkpJRmbmdlrWZlbWU.jpg",
+    "https://w0.peakpx.com/wallpaper/705/181/HD-wallpaper-lisa-blackpink-lisa-black-pink-yeoja-blackpink.jpg",
+    "https://images4.alphacoders.com/134/1342621.png"
+]
+
+
+def get_fsub_channels():
+    keys = load_keys()
+    fsub_raw = os.environ.get("FSUB_CHANNELS") or keys.get("FSUB_CHANNELS", "")
+    if not fsub_raw.strip():
+        return []
+    channels = []
+    for ch in fsub_raw.split(","):
+        ch = ch.strip()
+        if ch:
+            channels.append(ch)
+    return channels
+
+
+def get_start_images():
+    keys = load_keys()
+    raw = os.environ.get("START_IMAGES") or keys.get("START_IMAGES", "")
+    if raw.strip():
+        imgs = [i.strip() for i in raw.split(",") if i.strip()]
+        if imgs:
+            return imgs
+    return DEFAULT_START_IMAGES
+
+
+def send_photo_url(token, chat_id, photo_url, caption="", reply_markup=None):
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    data = {
+        "chat_id": chat_id,
+        "photo": photo_url,
+        "caption": markdown_to_html(caption),
+        "parse_mode": "HTML"
+    }
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup)
+    try:
+        r = requests.post(url, data=data, timeout=15)
+        if r.status_code == 200:
+            return r.json().get("result", {})
+        else:
+            print(f"Error sending photo URL: {r.text}")
+            return None
+    except Exception as e:
+        print(f"Error sending photo URL: {e}")
+        return None
+
+
+def check_user_fsub(token, user_id, admin_id):
+    if str(user_id) == str(admin_id):
+        return True, []
+
+    channels = get_fsub_channels()
+    if not channels:
+        return True, []
+
+    missing = []
+    for ch in channels:
+        try:
+            url = f"https://api.telegram.org/bot{token}/getChatMember?chat_id={ch}&user_id={user_id}"
+            r = requests.get(url, timeout=5)
+            res = r.json()
+            if res.get("ok"):
+                status = res.get("result", {}).get("status", "")
+                if status not in ["creator", "administrator", "member"]:
+                    missing.append(ch)
+            else:
+                missing.append(ch)
+        except Exception as e:
+            print(f"Error checking chat member for {ch}: {e}")
+            missing.append(ch)
+
+    if missing:
+        return False, missing
+    return True, []
+
+
+def send_fsub_notice(token, chat_id, missing_channels):
+    buttons = []
+    for idx, ch in enumerate(missing_channels, 1):
+        clean_ch = ch.replace("@", "")
+        ch_link = f"https://t.me/{clean_ch}"
+        buttons.append([{"text": f"📢 Join Channel ({ch})", "url": ch_link}])
+
+    buttons.append([{"text": "🔄 Check Membership / Try Again", "callback_data": "check_fsub"}])
+
+    reply_markup = {"inline_keyboard": buttons}
+
+    notice_text = (
+        "🔒 *Access Denied! Forced Subscription Required*\n\n"
+        "To use Medusa AI, you must join our official Telegram channel(s)/group(s):\n\n"
+    )
+    for ch in missing_channels:
+        notice_text += f"• `{ch}`\n"
+    notice_text += "\n👇 Click the button(s) below to join, then press **Check Membership**!"
+
+    images = get_start_images()
+    random_img = random.choice(images) if images else None
+
+    if random_img:
+        res = send_photo_url(token, chat_id, random_img, notice_text, reply_markup)
+        if not res:
+            send_message(token, chat_id, notice_text, reply_markup)
+    else:
+        send_message(token, chat_id, notice_text, reply_markup)
+
+
+def send_start_greeting(token, chat_id, sender_id, first_name, username, admin_id):
+    sender_str = str(sender_id)
+    user_data = load_user_data()
+    user_record = user_data.get(sender_str, {})
+    active_mode = user_record.get("active_mode", "groq")
+
+    display_username = f"@{username}" if username else "No username set"
+    mode_display = "Default (Free, Unlimited)" if active_mode == "groq" else "Premium"
+    is_unltd = user_record.get("unlimited", False) or (sender_str == str(admin_id))
+    credit_info = "Unlimited ♾️" if is_unltd else f"{PLAN_LIMITS.get(user_record.get('plan', 'free'), PLAN_LIMITS['free'])['medusa_credits']} questions/day"
+
+    caption = (
+        "🐍 *Medusa Awakened...*\n\n"
+        "I have woken, mortal. The serpent stirs.\n\n"
+        "👤 *USER PROFILE*\n"
+        f"• *Name:* {first_name}\n"
+        f"• *Username:* {display_username}\n"
+        f"• *Chat ID:* `{chat_id}`\n"
+        f"• *Active Mode:* {mode_display}\n"
+        f"• *Credits:* {credit_info}\n\n"
+        "Type `/help` to view all active commands or tap a quick action below!"
+    )
+
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "🌟 Upgrade Plan", "callback_data": "pay_stars_premium"},
+                {"text": "🔍 Web Search", "callback_data": "toggle_search"}
+            ],
+            [
+                {"text": "ℹ️ Help Menu", "callback_data": "show_help"},
+                {"text": "🧹 Clear History", "callback_data": "clear_history"}
+            ]
+        ]
+    }
+
+    images = get_start_images()
+    random_img = random.choice(images) if images else None
+
+    if random_img:
+        res = send_photo_url(token, chat_id, random_img, caption, reply_markup)
+        if not res:
+            send_message(token, chat_id, caption, reply_markup)
+    else:
+        send_message(token, chat_id, caption, reply_markup)
 
 
 def edit_message_media_bytes(token, chat_id, message_id, image_bytes, caption, reply_markup=None):
@@ -1388,6 +1548,71 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                     callback_data = callback_query.get("data", "")
                     sender_id = callback_query["from"]["id"]
                     msg_id = callback_query["message"]["message_id"]
+
+                    # -------- FORCED SUBSCRIPTION CHECK CALLBACK --------
+                    if callback_data == "check_fsub":
+                        is_sub, missing = check_user_fsub(token, sender_id, admin_id)
+                        if is_sub:
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "✅ Membership verified! Welcome to Medusa 🐍"}
+                            )
+                            try:
+                                requests.post(
+                                    f"https://api.telegram.org/bot{token}/deleteMessage",
+                                    data={"chat_id": chat_id, "message_id": msg_id}
+                                )
+                            except Exception:
+                                pass
+                            send_start_greeting(token, chat_id, sender_id, callback_query["from"].get("first_name", "User"), callback_query["from"].get("username", ""), admin_id)
+                        else:
+                            requests.post(
+                                f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                data={"callback_query_id": callback_query["id"], "text": "❌ You haven't joined all required channels/groups yet! Please join first.", "show_alert": True}
+                            )
+                        continue
+
+                    # -------- START MENU QUICK ACTIONS --------
+                    if callback_data == "toggle_search":
+                        search_modes[chat_id] = not search_modes.get(chat_id, False)
+                        status_str = "ENABLED 🟢" if search_modes[chat_id] else "DISABLED 🔴"
+                        requests.post(
+                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                            data={"callback_query_id": callback_query["id"], "text": f"Web Search is now {status_str}"}
+                        )
+                        send_message(token, chat_id, f"🔍 *Web Search Mode:* {status_str}")
+                        continue
+
+                    if callback_data == "show_help":
+                        requests.post(
+                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                            data={"callback_query_id": callback_query["id"], "text": "Displaying help menu..."}
+                        )
+                        help_text = (
+                            "ℹ️ *Medusa AI Commands*:\n\n"
+                            "• `/start` - Wake up the bot\n"
+                            "• `/help` - Show command menu\n"
+                            "• `/image <prompt>` - Generate AI image\n"
+                            "• `/upgrade` - Upgrade plan\n"
+                            "• `/check` - View plan status & credits\n"
+                            "• `/clear` - Clear conversation memory\n"
+                            "• `/search` - Toggle automatic web search\n"
+                            "• `/medusa` - Switch to Premium mode\n"
+                            "• `/default` - Switch to Default mode\n"
+                            "• `/enc` - Obfuscate Python script"
+                        )
+                        send_message(token, chat_id, help_text)
+                        continue
+
+                    if callback_data == "clear_history":
+                        if chat_id in user_histories:
+                            user_histories[chat_id].clear()
+                        requests.post(
+                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                            data={"callback_query_id": callback_query["id"], "text": "Conversation history cleared! 🧹"}
+                        )
+                        send_message(token, chat_id, "🧹 *Conversation memory has been wiped clean!*")
+                        continue
 
                     # -------- USER-INITIATED: Live Image Filter Callback --------
                     if callback_data.startswith("imgflt:"):
@@ -1924,6 +2149,12 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         user_data[sender_str] = user_record
                         save_single_user(sender_str, user_record)
 
+                    # -------- FORCED SUBSCRIPTION (FSub) CHECK --------
+                    is_sub, missing = check_user_fsub(token, sender_id, admin_id)
+                    if not is_sub:
+                        send_fsub_notice(token, chat_id, missing)
+                        continue
+
                     # -------- DOCUMENT MESSAGE --------
                     if "document" in message:
                         doc = message["document"]
@@ -2290,62 +2521,82 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                     # -------- START --------
                     if cmd == "start":
                         send_typing(token, chat_id)
-                        time.sleep(0.5)
-                        boot_resp = requests.post(
-                            f"https://api.telegram.org/bot{token}/sendMessage",
-                            data={"chat_id": chat_id, "text": "⏳ Starting..."},
-                            timeout=10
-                        )
-                        boot_msg_id = None
-                        try:
-                            boot_msg_id = boot_resp.json()["result"]["message_id"]
-                        except Exception:
-                            pass
+                        send_start_greeting(token, chat_id, sender_id, first_name, username, admin_id)
+                        continue
 
-                        time.sleep(1.2)
-                        send_typing(token, chat_id)
-                        time.sleep(1.0)
+                    # -------- ADMIN BROADCAST (/broadcast) --------
+                    if cmd == "broadcast":
+                        is_sub = (user_record.get("role") == "subadmin")
+                        if sender_str != str(admin_id) and not is_sub:
+                            send_message(token, chat_id, "🚫 *You are not authorized to use the broadcast command.*")
+                            continue
 
-                        wake_text = (
-                            "\U0001f40d *Medusa Awakened...*\n\n"
-                            "I have woken, mortal. The serpent stirs."
-                        )
-                        if boot_msg_id:
+                        broadcast_text = ""
+                        replied_msg = message.get("reply_to_message")
+
+                        if len(args) > 0:
+                            broadcast_text = " ".join(args)
+                        elif replied_msg and "text" in replied_msg:
+                            broadcast_text = replied_msg.get("text", "")
+                        elif replied_msg and "caption" in replied_msg:
+                            broadcast_text = replied_msg.get("caption", "")
+
+                        if not broadcast_text and not (replied_msg and ("photo" in replied_msg or "document" in replied_msg)):
+                            usage_msg = (
+                                "📢 *Admin Broadcast Usage*:\n\n"
+                                "• `/broadcast <your message here>`\n"
+                                "• Reply to a text or photo message with `/broadcast` to broadcast it to all registered users."
+                            )
+                            send_message(token, chat_id, usage_msg)
+                            continue
+
+                        all_users = load_user_data()
+                        total_users = len(all_users)
+                        if total_users == 0:
+                            send_message(token, chat_id, "⚠️ No registered users found in the database to broadcast to.")
+                            continue
+
+                        send_message(token, chat_id, f"🚀 *Starting Broadcast...*\nTargeting *{total_users}* registered users.")
+
+                        success_count = 0
+                        fail_count = 0
+                        header = "📢 *ANNOUNCEMENT / MAINTENANCE ALERT*\n\n"
+                        final_broadcast_content = header + broadcast_text if broadcast_text else ""
+
+                        for target_uid in list(all_users.keys()):
                             try:
-                                requests.post(
-                                    f"https://api.telegram.org/bot{token}/editMessageText",
-                                    data={
-                                        "chat_id": chat_id,
-                                        "message_id": boot_msg_id,
-                                        "text": markdown_to_html(wake_text),
-                                        "parse_mode": "HTML"
-                                    },
-                                    timeout=10
-                                )
+                                target_chat_id = int(target_uid)
+                                if replied_msg and "photo" in replied_msg:
+                                    photo_file_id = replied_msg["photo"][-1]["file_id"]
+                                    r_bc = requests.post(
+                                        f"https://api.telegram.org/bot{token}/sendPhoto",
+                                        data={
+                                            "chat_id": target_chat_id,
+                                            "photo": photo_file_id,
+                                            "caption": markdown_to_html(final_broadcast_content),
+                                            "parse_mode": "HTML"
+                                        },
+                                        timeout=10
+                                    )
+                                    if r_bc.status_code == 200:
+                                        success_count += 1
+                                    else:
+                                        fail_count += 1
+                                else:
+                                    send_message(token, target_chat_id, final_broadcast_content)
+                                    success_count += 1
                             except Exception:
-                                pass
-                        else:
-                            send_message(token, chat_id, wake_text)
+                                fail_count += 1
 
-                        time.sleep(1.0)
-                        send_typing(token, chat_id)
+                            time.sleep(0.05)
 
-                        display_username = f"@{username}" if username else "No username set"
-                        mode_display = "Default (Free, Unlimited)" if active_mode == "groq" else "Premium"
-                        is_unltd = user_record.get("unlimited", False) or (sender_str == str(admin_id))
-                        credit_info = "Unlimited ♾️" if is_unltd else f"{PLAN_LIMITS.get(user_record.get('plan', 'free'), PLAN_LIMITS['free'])['medusa_credits']} questions/day"
-
-                        info_card = (
-                            "\U0001f40d *Medusa \u2014 User Profile*\n\n"
-                            f"\U0001f464 *Name:* {first_name}\n"
-                            f"\U0001f4e7 *Username:* {display_username}\n"
-                            f"\U0001f194 *Chat ID:* `{chat_id}`\n"
-                            f"\U0001f4ca *Active Mode:* {mode_display}\n"
-                            f"\U0001f4b3 *Credits:* {credit_info}\n\n"
-                            "Use `/help` to see all active commands, mortal."
+                        report = (
+                            "📊 *Broadcast Completed Report*\n\n"
+                            f"• *Total Targeted Users:* `{total_users}`\n"
+                            f"• *Successfully Delivered:* `{success_count}` ✅\n"
+                            f"• *Failed/Blocked Users:* `{fail_count}` ❌"
                         )
-
-                        send_message(token, chat_id, info_card)
+                        send_message(token, chat_id, report)
                         continue
 
                     # -------- OBFUSCATE COMMAND (/enc) --------
