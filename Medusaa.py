@@ -1191,44 +1191,89 @@ def check_user_fsub(token, user_id, admin_id):
         return True, []
 
     missing = []
-    for ch in channels:
+    for item in channels:
+        ch_id = item.strip()
+        if "|" in ch_id:
+            ch_id = ch_id.split("|", 1)[0].strip()
+        elif ":" in ch_id and not ch_id.startswith("http"):
+            ch_id = ch_id.split(":", 1)[0].strip()
+
         try:
-            url = f"https://api.telegram.org/bot{token}/getChatMember?chat_id={ch}&user_id={user_id}"
+            url = f"https://api.telegram.org/bot{token}/getChatMember?chat_id={ch_id}&user_id={user_id}"
             r = requests.get(url, timeout=5)
             res = r.json()
             if res.get("ok"):
                 status = res.get("result", {}).get("status", "")
                 if status not in ["creator", "administrator", "member"]:
-                    missing.append(ch)
+                    missing.append(ch_id)
             else:
-                missing.append(ch)
+                missing.append(ch_id)
         except Exception as e:
-            print(f"Error checking chat member for {ch}: {e}")
-            missing.append(ch)
+            print(f"Error checking chat member for {ch_id}: {e}")
+            missing.append(ch_id)
 
     if missing:
         return False, missing
     return True, []
 
 
-def send_fsub_notice(token, chat_id, missing_channels):
+def send_fsub_notice(token, chat_id, missing_channels, first_name="User"):
+    all_channels = get_fsub_channels()
     buttons = []
-    for idx, ch in enumerate(missing_channels, 1):
-        clean_ch = ch.replace("@", "")
-        ch_link = f"https://t.me/{clean_ch}"
-        buttons.append([{"text": f"📢 Join Channel ({ch})", "url": ch_link}])
+    row = []
 
-    buttons.append([{"text": "🔄 Check Membership / Try Again", "callback_data": "check_fsub"}])
+    for idx, item in enumerate(all_channels, 1):
+        item_str = item.strip()
+        ch_id = item_str
+        ch_link = ""
+
+        if "|" in item_str:
+            parts = item_str.split("|", 1)
+            ch_id = parts[0].strip()
+            ch_link = parts[1].strip()
+        elif ":" in item_str and not item_str.startswith("http"):
+            parts = item_str.split(":", 1)
+            ch_id = parts[0].strip()
+            ch_link = parts[1].strip()
+
+        if not ch_link:
+            if ch_id.startswith("@"):
+                clean_ch = ch_id.replace("@", "")
+                ch_link = f"https://t.me/{clean_ch}"
+            elif ch_id.startswith("http://") or ch_id.startswith("https://"):
+                ch_link = ch_id
+            else:
+                # Private group/channel ID (-100...): dynamically fetch invite link via Telegram API
+                try:
+                    chat_resp = requests.get(f"https://api.telegram.org/bot{token}/getChat?chat_id={ch_id}", timeout=5).json()
+                    if chat_resp.get("ok"):
+                        ch_link = chat_resp.get("result", {}).get("invite_link", "")
+                    if not ch_link:
+                        exp_resp = requests.get(f"https://api.telegram.org/bot{token}/exportChatInviteLink?chat_id={ch_id}", timeout=5).json()
+                        if exp_resp.get("ok"):
+                            ch_link = exp_resp.get("result", "")
+                except Exception as e:
+                    print(f"Error fetching invite link for {ch_id}: {e}")
+
+        if not ch_link:
+            ch_link = f"https://t.me/{ch_id.replace('@', '')}"
+
+        row.append({"text": f"Join Channel {idx}", "url": ch_link})
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+
+    if row:
+        buttons.append(row)
+
+    buttons.append([{"text": "♻️ Try Again", "callback_data": "check_fsub"}])
 
     reply_markup = {"inline_keyboard": buttons}
 
     notice_text = (
-        "🔒 *Access Denied! Forced Subscription Required*\n\n"
-        "To use Medusa AI, you must join our official Telegram channel(s)/group(s):\n\n"
+        f"Hey <b>{html.escape(first_name)}</b>\n\n"
+        "<i>Please Join All My Update Channels To Use Me!</i>"
     )
-    for ch in missing_channels:
-        notice_text += f"• `{ch}`\n"
-    notice_text += "\n👇 Click the button(s) below to join, then press **Check Membership**!"
 
     images = get_start_images()
     random_img = random.choice(images) if images else None
@@ -2169,7 +2214,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                     # -------- FORCED SUBSCRIPTION (FSub) CHECK --------
                     is_sub, missing = check_user_fsub(token, sender_id, admin_id)
                     if not is_sub:
-                        send_fsub_notice(token, chat_id, missing)
+                        send_fsub_notice(token, chat_id, missing, first_name=first_name)
                         continue
 
                     # -------- DOCUMENT MESSAGE --------
