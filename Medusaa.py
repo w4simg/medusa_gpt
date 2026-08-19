@@ -1333,6 +1333,77 @@ def send_start_greeting(token, chat_id, sender_id, first_name, username, admin_i
         send_message(token, chat_id, caption, reply_markup)
 
 
+LAST_COMMIT_FILE = "last_commit.txt"
+
+
+def get_update_channel():
+    keys = load_keys()
+    ch = os.environ.get("UPDATE_CHANNEL") or keys.get("UPDATE_CHANNEL", "")
+    if ch.strip():
+        return ch.strip()
+    fsub = get_fsub_channels()
+    if fsub:
+        return fsub[0]
+    return ""
+
+
+def notify_update_channel(token, commit_msg="Bug fixes & performance improvements"):
+    target_ch = get_update_channel()
+    if not target_ch:
+        print("⚠️ No UPDATE_CHANNEL configured.")
+        return False
+
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    message_text = (
+        "🚀 *MEDUSA BOT UPDATED!*\n\n"
+        "📢 *Update Details:*\n"
+        f"• `{commit_msg}`\n\n"
+        "👤 *Developer:* @w4simg\n"
+        f"⏰ *Time:* `{current_time}`"
+    )
+
+    images = get_start_images()
+    random_img = random.choice(images) if images else None
+
+    if random_img:
+        res = send_photo_url(token, target_ch, random_img, message_text)
+        if not res:
+            send_message(token, target_ch, message_text)
+    else:
+        send_message(token, target_ch, message_text)
+    return True
+
+
+def check_and_notify_git_update(token):
+    try:
+        import subprocess
+        res = subprocess.run(["git", "log", "-1", "--pretty=format:%h|%s"], capture_output=True, text=True, timeout=5)
+        if res.returncode == 0 and res.stdout.strip():
+            parts = res.stdout.strip().split("|", 1)
+            commit_hash = parts[0].strip()
+            commit_msg = parts[1].strip() if len(parts) > 1 else "Bug fixes & new features added"
+
+            last_saved = ""
+            if os.path.exists(LAST_COMMIT_FILE):
+                try:
+                    with open(LAST_COMMIT_FILE, "r") as f:
+                        last_saved = f.read().strip()
+                except Exception:
+                    pass
+
+            if commit_hash != last_saved:
+                print(f"📢 New deployment detected ({commit_hash}): {commit_msg}")
+                try:
+                    with open(LAST_COMMIT_FILE, "w") as f:
+                        f.write(commit_hash)
+                except Exception:
+                    pass
+                notify_update_channel(token, commit_msg)
+    except Exception as e:
+        print(f"Git update check notice error: {e}")
+
+
 def edit_message_media_bytes(token, chat_id, message_id, image_bytes, caption, reply_markup=None):
     url = f"https://api.telegram.org/bot{token}/editMessageMedia"
     media_obj = {
@@ -1575,6 +1646,9 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
         print(f"Bot Username: @{bot_username}")
     except Exception as e:
         print(f"Error fetching bot username: {e}")
+
+    # Check and announce any new Git deployment updates to channel
+    check_and_notify_git_update(token)
 
     user_histories = {}
     search_modes = {}
@@ -2688,6 +2762,22 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         send_message(token, chat_id, report)
                         continue
 
+                    # -------- MANUAL UPDATE ANNOUNCEMENT (/sendupdate) --------
+                    if cmd == "sendupdate":
+                        is_sub = (user_record.get("role") == "subadmin")
+                        if sender_str != str(admin_id) and not is_sub:
+                            send_message(token, chat_id, "🚫 *You are not authorized to send update announcements.*")
+                            continue
+
+                        update_msg = " ".join(args) if args else "Bug fixes & new features added"
+                        res = notify_update_channel(token, update_msg)
+                        target_ch = get_update_channel()
+                        if res:
+                            send_message(token, chat_id, f"✅ *Update Announcement posted to `{target_ch}`!*")
+                        else:
+                            send_message(token, chat_id, "⚠️ *Failed to send update announcement. Check UPDATE_CHANNEL setting.*")
+                        continue
+
                     # -------- OBFUSCATE COMMAND (/enc) --------
                     if cmd == "enc":
                         # Check if it's a reply to a message with a document
@@ -3246,8 +3336,33 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{"status": "ok"}')
 
+    def do_POST(self):
+        if self.path == "/github-webhook":
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length)
+                payload = json.loads(body.decode("utf-8"))
+
+                commits = payload.get("commits", [])
+                if commits:
+                    latest_commit = commits[-1]
+                    commit_msg = latest_commit.get("message", "Bug fixes & new features added").strip()
+                    token = os.environ.get("BOT_TOKEN") or load_keys().get("BOT_TOKEN", "")
+                    if token:
+                        notify_update_channel(token, commit_msg)
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status": "received"}')
+                return
+            except Exception as e:
+                print(f"GitHub webhook processing error: {e}")
+
+        self.send_response(400)
+        self.end_headers()
+
     def log_message(self, format, *args):
-        # Suppress logging health check requests to keep logs clean
         return
 
 def run_health_check_server():
