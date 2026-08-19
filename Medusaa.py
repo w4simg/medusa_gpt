@@ -1114,9 +1114,9 @@ def send_photo_bytes(token, chat_id, image_bytes, caption, reply_markup=None):
 
 
 DEFAULT_START_IMAGES = [
-    "https://images.wallpapersden.com/image/download/anime-girl-stylish-digital-art_bW1lZm6UmZqaraWkpJRmbmdlrWZlbWU.jpg",
-    "https://w0.peakpx.com/wallpaper/705/181/HD-wallpaper-lisa-blackpink-lisa-black-pink-yeoja-blackpink.jpg",
-    "https://images4.alphacoders.com/134/1342621.png"
+    "https://images.unsplash.com/photo-1534447677768-be436bb09401?q=80&w=1000&auto=format&fit=crop",
+    "https://images.unsplash.com/photo-1607604276583-eef5d076aa5f?q=80&w=1000&auto=format&fit=crop",
+    "https://images.unsplash.com/photo-1578632767115-351597cf2477?q=80&w=1000&auto=format&fit=crop"
 ]
 
 
@@ -1158,10 +1158,27 @@ def send_photo_url(token, chat_id, photo_url, caption="", reply_markup=None):
         if r.status_code == 200:
             return r.json().get("result", {})
         else:
-            print(f"Error sending photo URL: {r.text}")
-            return None
+            print(f"⚠️ Telegram sendPhoto URL failed ({r.text}). Retrying with direct download fallback...")
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            }
+            img_resp = requests.get(photo_url, headers=headers, timeout=15)
+            if img_resp.status_code == 200 and len(img_resp.content) > 0:
+                return send_photo_bytes(token, chat_id, img_resp.content, caption, reply_markup)
+            else:
+                print(f"Direct download fallback failed with status: {img_resp.status_code}")
+                return None
     except Exception as e:
         print(f"Error sending photo URL: {e}")
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            }
+            img_resp = requests.get(photo_url, headers=headers, timeout=15)
+            if img_resp.status_code == 200 and len(img_resp.content) > 0:
+                return send_photo_bytes(token, chat_id, img_resp.content, caption, reply_markup)
+        except Exception:
+            pass
         return None
 
 
