@@ -499,7 +499,7 @@ def ask_groq(api_key, messages):
             "Content-Type": "application/json"
         },
         json={
-            "model": "llama-3.1-8b-instant",
+            "model": "openai/gpt-oss-120b",
             "messages": messages,
             "temperature": TEMPERATURE,
             "stream": False
