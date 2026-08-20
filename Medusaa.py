@@ -499,24 +499,46 @@ def ask_medusa(api_key, messages):
     return r.json()["choices"][0]["message"]["content"]
 
 
+GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "llama-3.3-70b-versatile",
+    "llama3-70b-8192",
+    "llama3-8b-8192",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it"
+]
+
+
 def ask_groq(api_key, messages):
     global TEMPERATURE
+    for model_name in GROQ_MODELS:
+        try:
+            r = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": model_name,
+                    "messages": messages,
+                    "temperature": TEMPERATURE,
+                    "stream": False
+                },
+                timeout=30
+            )
+            if r.status_code == 200:
+                res_json = r.json()
+                content = res_json["choices"][0]["message"]["content"]
+                if content and len(content.strip()) > 0:
+                    return content
+            else:
+                print(f"⚠️ Groq model '{model_name}' returned status {r.status_code}")
+        except Exception as e:
+            print(f"⚠️ Groq model '{model_name}' error: {e}")
+            continue
 
-    r = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "openai/gpt-oss-120b",
-            "messages": messages,
-            "temperature": TEMPERATURE,
-            "stream": False
-        }
-    )
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+    raise Exception("All Groq models failed or returned empty responses for this key.")
 
 
 # =================================
@@ -712,46 +734,69 @@ def multi_platform_search(query):
     return combined_results
 
 
-def ask_gemini(api_key, messages, model="gemini-2.5-flash"):
+GEMINI_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"]
+
+
+def ask_gemini(api_key, messages, model=None):
     global TEMPERATURE
-    url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    r = requests.post(
-        url,
-        headers=headers,
-        json={
-            "model": model,
-            "messages": messages,
-            "temperature": TEMPERATURE,
-            "stream": False
-        }
-    )
-    if r.status_code != 200:
-        print(f"❌ Gemini API Error: {r.status_code} - {r.text}")
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+    models_to_try = [model] if model else GEMINI_MODELS
 
-
-def ask_gemini_with_failover(gemini_keys, messages, model="gemini-2.5-flash"):
-    global current_gemini_idx
-    if not gemini_keys:
-        raise Exception("No active Gemini API keys are configured in key.txt.")
-        
-    num_keys = len(gemini_keys)
-    for attempt in range(num_keys):
-        idx = (current_gemini_idx + attempt) % num_keys
-        key = gemini_keys[idx]
+    for m in models_to_try:
         try:
-            reply = ask_gemini(key, messages, model=model)
-            current_gemini_idx = idx
-            return reply
+            url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            r = requests.post(
+                url,
+                headers=headers,
+                json={
+                    "model": m,
+                    "messages": messages,
+                    "temperature": TEMPERATURE,
+                    "stream": False
+                },
+                timeout=30
+            )
+            if r.status_code == 200:
+                res_json = r.json()
+                content = res_json["choices"][0]["message"]["content"]
+                if content and len(content.strip()) > 0:
+                    return content
+            else:
+                print(f"⚠️ Gemini model '{m}' returned status {r.status_code}")
         except Exception as e:
-            print(f"⚠️ Gemini API key slot {idx+1} failed with error: {e}. Trying next key...")
-            
-    raise Exception("All Gemini API keys are currently exhausted or failing.")
+            print(f"⚠️ Gemini model '{m}' error: {e}")
+            continue
+
+    raise Exception("All Gemini models failed for this API key.")
+
+
+def ask_gemini_with_failover(gemini_keys, messages, model=None):
+    global current_gemini_idx
+    if gemini_keys:
+        num_keys = len(gemini_keys)
+        for attempt in range(num_keys):
+            idx = (current_gemini_idx + attempt) % num_keys
+            key = gemini_keys[idx]
+            try:
+                reply = ask_gemini(key, messages, model=model)
+                current_gemini_idx = idx
+                return reply
+            except Exception as e:
+                print(f"⚠️ Gemini API key slot {idx+1} failed with error: {e}. Trying next key...")
+
+    # Cross-engine Vision failover: If Gemini keys fail, fall back to Groq Vision!
+    try:
+        _, _, groq_keys, _, _, _, _ = load_keys()
+        if groq_keys:
+            print("🔄 Falling back from Gemini to Groq Vision API...")
+            return ask_groq_vision_with_failover(groq_keys, messages)
+    except Exception as ge:
+        print(f"⚠️ Groq Vision failover error: {ge}")
+
+    raise Exception("All Gemini API keys and Groq Vision failover engines are currently exhausted or failing.")
 
 
 current_gemini_idx = 0
@@ -2572,6 +2617,19 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
 
                     # -------- VOICE / AUDIO MESSAGE --------
                     if "voice" in message or "audio" in message:
+                        plan = user_record.get("plan", "free")
+                        is_admin = (sender_str == str(admin_id))
+                        is_unltd = user_record.get("unlimited", False) or is_admin
+
+                        if not is_unltd and plan == "free":
+                            send_message(
+                                token, chat_id,
+                                "🌟 *Voice Note AI is a Premium Feature!*\n\n"
+                                "Voice Note processing is available exclusively for **Premium** members.\n\n"
+                                "🚀 Type `/upgrade` to upgrade your plan and unlock Voice AI!"
+                            )
+                            continue
+
                         voice_obj = message.get("voice") or message.get("audio")
                         file_id = voice_obj["file_id"]
 
@@ -2952,6 +3010,19 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
 
                     # -------- VOICE RESPONSE TOGGLE (/voice) --------
                     if cmd == "voice":
+                        plan = user_record.get("plan", "free")
+                        is_admin = (sender_str == str(admin_id))
+                        is_unltd = user_record.get("unlimited", False) or is_admin
+
+                        if not is_unltd and plan == "free":
+                            send_message(
+                                token, chat_id,
+                                "🌟 *Voice Note AI is a Premium Feature!*\n\n"
+                                "Voice Notes and Voice Response Mode are available exclusively for **Premium** members.\n\n"
+                                "🚀 Type `/upgrade` to upgrade your plan and unlock Voice AI!"
+                            )
+                            continue
+
                         current_vmode = user_record.get("voice_mode", False)
                         user_record["voice_mode"] = not current_vmode
                         save_single_user(sender_str, user_record)
@@ -3618,30 +3689,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b'{"status": "ok"}')
 
     def do_POST(self):
-        if self.path == "/github-webhook":
-            try:
-                content_length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(content_length)
-                payload = json.loads(body.decode("utf-8"))
-
-                commits = payload.get("commits", [])
-                if commits:
-                    latest_commit = commits[-1]
-                    commit_msg = latest_commit.get("message", "Bug fixes & new features added").strip()
-                    token = os.environ.get("BOT_TOKEN") or load_keys().get("BOT_TOKEN", "")
-                    if token:
-                        notify_update_channel(token, commit_msg)
-
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"status": "received"}')
-                return
-            except Exception as e:
-                print(f"GitHub webhook processing error: {e}")
-
-        self.send_response(400)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
         self.end_headers()
+        self.wfile.write(b'{"status": "received"}')
 
     def log_message(self, format, *args):
         return
