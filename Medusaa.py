@@ -457,9 +457,12 @@ When replying with code or programming-related content:
         if pref_lines:
             base += "\nUser Preferences (adapt your responses according to these):\n" + "\n".join(pref_lines) + "\n"
 
-    # Instruction for preference extraction
+    # Instruction for preference extraction & voice response
     base += """
 If the user explicitly states a preference (like preferred programming language, writing style, or tone), write it at the very end of your response inside a tag like [PREF: language=Python, style=concise]. Make sure it is exactly in this bracket format. Do not repeat preferences the user already has.
+
+CRITICAL VOICE NOTE INSTRUCTION:
+When the user asks you to say something, send a voice note of text, or reply in voice mode, output ONLY the clean spoken response itself. NEVER include meta-commentary like "Voicing your...", "Here is your voice note:", "Here you go:", "Sure! Here is...", or repeat the user's prompt back to them.
 """
 
     if MOOD == "normal":
@@ -1385,12 +1388,35 @@ def transcribe_audio_groq(groq_keys, audio_bytes, filename="voice.ogg"):
     raise Exception("All Groq API keys failed for voice transcription.")
 
 
+def clean_voice_text(text):
+    if not text:
+        return ""
+    t = str(text).strip()
+
+    # Extract inner quoted string if present (e.g., Voicing your "X"... Here you go: "X")
+    quoted = re.findall(r'["\u201c\u201d\u2018\u2019\'](.*?)["\u201c\u201d\u2018\u2019\']', t)
+    if quoted:
+        for q in reversed(quoted):
+            q_clean = q.strip()
+            if len(q_clean) > 1:
+                t = q_clean
+                break
+
+    # Strip conversational LLM intro prefixes
+    t = re.sub(r"^(?:voicing your|here is your voice note|here's your voice note|sure!|here you go|voicing|voicing:)[^:]*:\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^(?:voicing your|here is your voice note|here's your voice note|sure!|here you go|voicing|voicing:)\s*", "", t, flags=re.IGNORECASE)
+
+    # Remove markdown symbols & URLs for clean speech
+    t = re.sub(r"[*_`#~>|\-\U00010000-\U0010ffff]", "", t)
+    t = re.sub(r"https?://\S+", "", t).strip()
+    return t
+
+
 def text_to_speech_bytes(text, lang="en"):
     if not gTTS:
         return None
     try:
-        clean_text = re.sub(r"[*_`#~>|\-\U00010000-\U0010ffff]", "", str(text))
-        clean_text = re.sub(r"https?://\S+", "", clean_text).strip()
+        clean_text = clean_voice_text(text)
         if not clean_text:
             clean_text = "Here is your response."
 
@@ -1428,6 +1454,47 @@ def send_voice_bytes(token, chat_id, voice_bytes, caption="", reply_markup=None)
 LAST_COMMIT_FILE = "last_commit.txt"
 
 
+def is_commit_already_notified(commit_key):
+    commit_key = str(commit_key).strip().lower()
+    # 1. Check MongoDB
+    if mongo_db is not None:
+        try:
+            cfg = mongo_db["bot_config"].find_one({"_id": "last_notified_commit"})
+            if cfg and cfg.get("commit_key") == commit_key:
+                return True
+        except Exception as e:
+            print(f"MongoDB commit check error: {e}")
+
+    # 2. Check local disk
+    if os.path.exists(LAST_COMMIT_FILE):
+        try:
+            with open(LAST_COMMIT_FILE, "r") as f:
+                if f.read().strip().lower() == commit_key:
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def mark_commit_as_notified(commit_key):
+    commit_key = str(commit_key).strip().lower()
+    if mongo_db is not None:
+        try:
+            mongo_db["bot_config"].update_one(
+                {"_id": "last_notified_commit"},
+                {"$set": {"commit_key": commit_key, "timestamp": time.time()}},
+                upsert=True
+            )
+        except Exception as e:
+            print(f"MongoDB commit mark error: {e}")
+
+    try:
+        with open(LAST_COMMIT_FILE, "w") as f:
+            f.write(commit_key)
+    except Exception:
+        pass
+
+
 def get_update_channel():
     keys = load_keys()
     ch = os.environ.get("UPDATE_CHANNEL") or keys.get("UPDATE_CHANNEL", "")
@@ -1439,11 +1506,19 @@ def get_update_channel():
     return ""
 
 
-def notify_update_channel(token, commit_msg="Bug fixes & performance improvements"):
+def notify_update_channel(token, commit_msg="Bug fixes & performance improvements", commit_id=None):
     target_ch = get_update_channel()
     if not target_ch:
         print("⚠️ No UPDATE_CHANNEL configured.")
         return False
+
+    commit_key = (commit_id if commit_id else commit_msg).strip().lower()
+
+    if is_commit_already_notified(commit_key):
+        print(f"ℹ️ Update notification for '{commit_key}' already sent to channel. Skipping duplicate.")
+        return False
+
+    mark_commit_as_notified(commit_key)
 
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1475,23 +1550,7 @@ def check_and_notify_git_update(token):
             parts = res.stdout.strip().split("|", 1)
             commit_hash = parts[0].strip()
             commit_msg = parts[1].strip() if len(parts) > 1 else "Bug fixes & new features added"
-
-            last_saved = ""
-            if os.path.exists(LAST_COMMIT_FILE):
-                try:
-                    with open(LAST_COMMIT_FILE, "r") as f:
-                        last_saved = f.read().strip()
-                except Exception:
-                    pass
-
-            if commit_hash != last_saved:
-                print(f"📢 New deployment detected ({commit_hash}): {commit_msg}")
-                try:
-                    with open(LAST_COMMIT_FILE, "w") as f:
-                        f.write(commit_hash)
-                except Exception:
-                    pass
-                notify_update_channel(token, commit_msg)
+            notify_update_channel(token, commit_msg, commit_id=commit_hash)
     except Exception as e:
         print(f"Git update check notice error: {e}")
 
@@ -2559,8 +2618,9 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                                 save_single_user(sender_str, user_record)
 
                                 # 5. Convert response to Voice Note & Reply
-                                caption_text = f"🎙️ *Speech Recognized:* _{transcribed_text}_\n\n🐍 *Medusa:* {ai_reply}"
-                                voice_bytes = text_to_speech_bytes(ai_reply, lang="en")
+                                clean_reply = clean_voice_text(ai_reply)
+                                caption_text = f"🎙️ *Speech Recognized:* _{transcribed_text}_\n\n🐍 *Medusa:* {clean_reply}"
+                                voice_bytes = text_to_speech_bytes(clean_reply, lang="en")
 
                                 if voice_bytes:
                                     send_voice_bytes(token, chat_id, voice_bytes, caption=caption_text)
@@ -3486,9 +3546,10 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         save_user_data(user_data)
 
                         if user_record.get("voice_mode", False):
-                            voice_bytes = text_to_speech_bytes(reply, lang="en")
+                            clean_rep = clean_voice_text(reply)
+                            voice_bytes = text_to_speech_bytes(clean_rep, lang="en")
                             if voice_bytes:
-                                send_voice_bytes(token, chat_id, voice_bytes, caption=reply)
+                                send_voice_bytes(token, chat_id, voice_bytes, caption=clean_rep)
                             else:
                                 send_message(token, chat_id, reply)
                         else:
