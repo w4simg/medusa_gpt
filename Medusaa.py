@@ -8,6 +8,7 @@ import io
 import html
 import signal
 import random
+import math
 import certifi
 from datetime import datetime
 from colorama import Fore, init
@@ -922,21 +923,36 @@ def set_bot_commands(token, admin_id, user_data=None):
 # 👑 ADMIN PANEL HELPERS
 # =================================
 
-def get_admin_panel_data(admin_id):
+def get_admin_panel_data(admin_id, page=1, per_page=5):
     user_data = load_user_data()
     total_users = len(user_data)
+    now = time.time()
 
     active_today = 0
-    now = time.time()
-    user_lines = []
+    non_admin_users = []
 
     for uid, info in user_data.items():
+        if uid != str(admin_id):
+            non_admin_users.append((uid, info))
+        c_used = info.get("credits_used", 0)
+        if c_used > 0 and (now - info.get("last_reset", 0) < 86400):
+            active_today += 1
+
+    total_pages = max(1, math.ceil(len(non_admin_users) / per_page))
+    page = max(1, min(page, total_pages))
+
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+    page_users = non_admin_users[start_idx:end_idx]
+
+    user_lines = []
+    inline_keyboard = []
+
+    for uid, info in page_users:
         active_mode = info.get("active_mode", "groq").upper()
         is_unlimited = info.get("unlimited", False)
 
-        if uid == str(admin_id):
-            credits = "Unlimited (Admin)"
-        elif is_unlimited:
+        if is_unlimited:
             credits = "Unlimited (Granted)"
         else:
             if now - info.get("last_reset", 0) >= 86400:
@@ -944,8 +960,6 @@ def get_admin_panel_data(admin_id):
             else:
                 c_used = info.get("credits_used", 0)
                 credits = f"{c_used}/4"
-                if c_used > 0:
-                    active_today += 1
 
         name = info.get("first_name", "User")
         username = info.get("username", "None")
@@ -956,6 +970,15 @@ def get_admin_panel_data(admin_id):
             f"   ID: `{uid}` | Mode: `{display_mode}` | Credits: `{credits}`"
         )
 
+        row = [
+            {"text": f"Reset {name}", "callback_data": f"reset_{uid}_{page}"}
+        ]
+        if is_unlimited:
+            row.append({"text": "Revoke Unlimited", "callback_data": f"revoke_{uid}_{page}"})
+        else:
+            row.append({"text": "Grant Unlimited ♾️", "callback_data": f"unlimited_{uid}_{page}"})
+        inline_keyboard.append(row)
+
     user_list_str = "\n\n".join(user_lines) if user_lines else "No users registered yet."
 
     text = (
@@ -964,39 +987,36 @@ def get_admin_panel_data(admin_id):
         f"📊 *Stats*:\n"
         f"• Total Users: {total_users}\n"
         f"• Active Today: {active_today}\n\n"
-        f"👥 *User List*:\n"
+        f"👥 *User List (Page {page}/{total_pages})*:\n"
         f"{user_list_str}"
     )
 
-    inline_keyboard = []
-    for uid, info in user_data.items():
-        if uid == str(admin_id):
-            continue
-        name = info.get("first_name", "User")
-        is_unlimited = info.get("unlimited", False)
-        row = [
-            {"text": f"Reset {name}", "callback_data": f"reset_{uid}"}
-        ]
-        if is_unlimited:
-            row.append({"text": f"Revoke Unlimited", "callback_data": f"revoke_{uid}"})
-        else:
-            row.append({"text": f"Grant Unlimited ♾️", "callback_data": f"unlimited_{uid}"})
-        inline_keyboard.append(row)
+    # Navigation buttons row
+    nav_row = []
+    if page > 1:
+        nav_row.append({"text": "◀️ Previous", "callback_data": f"admin_page_{page-1}"})
+    
+    nav_row.append({"text": f"📄 {page}/{total_pages}", "callback_data": f"admin_page_{page}"})
 
-    if len(user_data) > 1:
+    if page < total_pages:
+        nav_row.append({"text": "Next ▶️", "callback_data": f"admin_page_{page+1}"})
+
+    inline_keyboard.append(nav_row)
+
+    if total_users > 1:
         inline_keyboard.append([
-            {"text": "Reset All Users", "callback_data": "reset_all"}
+            {"text": "Reset All Users", "callback_data": f"reset_all_{page}"}
         ])
 
     inline_keyboard.append([
-        {"text": "🔄 Refresh Panel", "callback_data": "refresh_admin"}
+        {"text": "🔄 Refresh Panel", "callback_data": f"admin_page_{page}"}
     ])
 
     return text, {"inline_keyboard": inline_keyboard}
 
 
-def update_admin_panel(token, chat_id, message_id, admin_id):
-    text, reply_markup = get_admin_panel_data(admin_id)
+def update_admin_panel(token, chat_id, message_id, admin_id, page=1):
+    text, reply_markup = get_admin_panel_data(admin_id, page=page)
     url = f"https://api.telegram.org/bot{token}/editMessageText"
     data = {
         "chat_id": chat_id,
@@ -2100,8 +2120,8 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         style_msg = (
                             f"🎨 *Select Identifier Renaming Style for:* `{pending['file_name']}`\n"
                             f"Selected Level: `{level.upper()}`\n\n"
-                            "• *Hexadecimal*: Clean and standard hexadecimal variables (`_0x1a`)\n"
-                            "• *Confusing*: Variables named using hard-to-distinguish chars (`lO1lIO`)"
+                            "• *Hexadecimal*: Clean & standard hexadecimal (`_0x1a`)\n"
+                            "• *Confusing*: Hard-to-distinguish chars (`lO1lIO`)"
                         )
                         edit_message_text(token, chat_id, msg_id, style_msg, reply_markup=keyboard)
                         continue
@@ -2117,10 +2137,10 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             )
                             edit_message_text(token, chat_id, msg_id, "❌ *No pending file found or session expired.*")
                             continue
-                            
+
                         style = callback_data.split("py_style_")[1]
                         level = pending.get("level", "strong")
-                        
+
                         requests.post(
                             f"https://api.telegram.org/bot{token}/answerCallbackQuery",
                             data={"callback_query_id": callback_query["id"], "text": "Obfuscating..."}
@@ -2138,7 +2158,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         user_record["pending_file"] = None
                         user_data[sender_str] = user_record
                         save_single_user(sender_str, user_record)
-                        
+
                         requests.post(
                             f"https://api.telegram.org/bot{token}/answerCallbackQuery",
                             data={"callback_query_id": callback_query["id"], "text": "Action cancelled."}
@@ -2146,7 +2166,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         edit_message_text(token, chat_id, msg_id, "❌ *Action cancelled by user.*")
                         continue
 
-                    # Admin and Subadmin callbacks from here
+                    # -------- ADMIN AND SUBADMIN CALLBACKS --------
                     sender_rec = user_data.get(str(sender_id), {})
                     is_sub = (sender_rec.get("role") == "subadmin")
                     if str(sender_id) != str(admin_id) and not is_sub:
@@ -2156,14 +2176,27 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         )
                         continue
 
-                    if callback_data.startswith("reset_"):
-                        target_id = callback_data.split("_")[1]
+                    if callback_data.startswith("admin_page_"):
+                        try:
+                            target_page = int(callback_data.split("admin_page_")[1])
+                        except Exception:
+                            target_page = 1
+                        update_admin_panel(token, chat_id, msg_id, admin_id, page=target_page)
+                        requests.post(
+                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                            data={"callback_query_id": callback_query["id"], "text": f"Loaded Page {target_page}"}
+                        )
+                        continue
+
+                    if callback_data.startswith("reset_") and not callback_data.startswith("reset_all"):
+                        parts = callback_data.split("_")
+                        target_id = parts[1]
+                        page = int(parts[2]) if len(parts) > 2 else 1
                         user_data = load_user_data()
                         if target_id in user_data:
                             user_data[target_id]["credits_used"] = 0
                             user_data[target_id]["last_reset"] = time.time()
                             save_user_data(user_data)
-                            # Notify the user that their credits were reset
                             send_message(token, int(target_id), "✅ Your Premium Mode credits have been reset by the Admin! You can ask 4 more questions now.")
                             msg_text = f"Credits for {user_data[target_id].get('first_name')} reset!"
                         else:
@@ -2173,10 +2206,13 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             f"https://api.telegram.org/bot{token}/answerCallbackQuery",
                             data={"callback_query_id": callback_query["id"], "text": msg_text}
                         )
-                        update_admin_panel(token, chat_id, msg_id, admin_id)
+                        update_admin_panel(token, chat_id, msg_id, admin_id, page=page)
+                        continue
 
-                    elif callback_data.startswith("unlimited_"):
-                        target_id = callback_data.split("_")[1]
+                    if callback_data.startswith("unlimited_"):
+                        parts = callback_data.split("_")
+                        target_id = parts[1]
+                        page = int(parts[2]) if len(parts) > 2 else 1
                         user_data = load_user_data()
                         if target_id in user_data:
                             user_data[target_id]["unlimited"] = True
@@ -2191,10 +2227,13 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             f"https://api.telegram.org/bot{token}/answerCallbackQuery",
                             data={"callback_query_id": callback_query["id"], "text": msg_text}
                         )
-                        update_admin_panel(token, chat_id, msg_id, admin_id)
+                        update_admin_panel(token, chat_id, msg_id, admin_id, page=page)
+                        continue
 
-                    elif callback_data.startswith("revoke_"):
-                        target_id = callback_data.split("_")[1]
+                    if callback_data.startswith("revoke_"):
+                        parts = callback_data.split("_")
+                        target_id = parts[1]
+                        page = int(parts[2]) if len(parts) > 2 else 1
                         user_data = load_user_data()
                         if target_id in user_data:
                             user_data[target_id]["unlimited"] = False
@@ -2211,7 +2250,25 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                             f"https://api.telegram.org/bot{token}/answerCallbackQuery",
                             data={"callback_query_id": callback_query["id"], "text": msg_text}
                         )
-                        update_admin_panel(token, chat_id, msg_id, admin_id)
+                        update_admin_panel(token, chat_id, msg_id, admin_id, page=page)
+                        continue
+
+                    if callback_data.startswith("reset_all"):
+                        parts = callback_data.split("_")
+                        page = int(parts[2]) if len(parts) > 2 else 1
+                        user_data = load_user_data()
+                        for uid in user_data:
+                            if uid != str(admin_id):
+                                user_data[uid]["credits_used"] = 0
+                                user_data[uid]["last_reset"] = time.time()
+                        save_user_data(user_data)
+
+                        requests.post(
+                            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                            data={"callback_query_id": callback_query["id"], "text": "All user credits reset!"}
+                        )
+                        update_admin_panel(token, chat_id, msg_id, admin_id, page=page)
+                        continue
 
 
 
