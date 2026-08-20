@@ -7,3 +7,4 @@ pymongo
 dnspython
 python-dotenv
 certifi
+gTTS
