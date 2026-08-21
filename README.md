@@ -109,10 +109,6 @@ Medusa is a private, fully-featured Telegram AI assistant. It handles text chat,
 
 ---
 
-## 🔒 Privacy
-
-- The bot **only works in private chats**. It completely ignores group messages.
-- Conversation history is stored per-user and can be cleared at any time with `/clear`.
 
 
 ---
