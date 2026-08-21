@@ -2999,8 +2999,10 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                     # -------- MODE COMMANDS --------
                     if cmd == "medusa":
                         maint_msg = (
-                            "I am sorry, I can't fulfill your request. Our models are currently in maintenance due to being overloaded, so I had to stop access.\n\n"
-                            "Maybe I will never be back, but if I come back, I will notify you."
+                            "*I am sorry, but this really happened. Our models are currently under maintenance due to being overloaded, so I had to stop access for now.*\n\n"
+                            "*I tried my best to keep everything running, but the situation got out of my control. Right now, I don't know when—or even if—the service will return.*\n\n"
+                            "*Maybe this is goodbye forever. Maybe one day I will come back and everything will work again. But if that day comes, I promise I will notify you.*\n\n"
+                            "*Thank you to everyone who supported and used it. I never expected things to end like this.* 🖤"
                         )
                         keys = load_keys()
                         medusa_img_raw = os.environ.get("MEDUSA_IMAGE") or keys.get("MEDUSA_IMAGE", "")
