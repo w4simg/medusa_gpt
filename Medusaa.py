@@ -19,10 +19,6 @@ from dotenv import load_dotenv
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-try:
-    from gtts import gTTS
-except ImportError:
-    gTTS = None
 
 # Load environment variables from .env file locally
 load_dotenv()
@@ -457,12 +453,9 @@ When replying with code or programming-related content:
         if pref_lines:
             base += "\nUser Preferences (adapt your responses according to these):\n" + "\n".join(pref_lines) + "\n"
 
-    # Instruction for preference extraction & voice response
+    # Instruction for preference extraction
     base += """
 If the user explicitly states a preference (like preferred programming language, writing style, or tone), write it at the very end of your response inside a tag like [PREF: language=Python, style=concise]. Make sure it is exactly in this bracket format. Do not repeat preferences the user already has.
-
-CRITICAL VOICE NOTE INSTRUCTION:
-When the user asks you to say something, send a voice note of text, or reply in voice mode, output ONLY the clean spoken response itself. NEVER include meta-commentary like "Voicing your...", "Here is your voice note:", "Here you go:", "Sure! Here is...", or repeat the user's prompt back to them.
 """
 
     if MOOD == "normal":
@@ -927,8 +920,7 @@ def set_bot_commands(token, admin_id, user_data=None):
         {"command": "search", "description": "Toggle web search 🔍"},
         {"command": "medusa", "description": "Switch to Premium Mode 🌟"},
         {"command": "default", "description": "Switch to Default Mode 🔓"},
-        {"command": "enc", "description": "Obfuscate Python file 🔒"},
-        {"command": "voice", "description": "Toggle Voice Note AI mode 🎙️"}
+        {"command": "enc", "description": "Obfuscate Python file 🔒"}
     ]
     
     bot_admin_cmds = default_cmds + [
@@ -1405,95 +1397,6 @@ def send_start_greeting(token, chat_id, sender_id, first_name, username, admin_i
             send_message(token, chat_id, caption, reply_markup)
     else:
         send_message(token, chat_id, caption, reply_markup)
-
-
-def transcribe_audio_groq(groq_keys, audio_bytes, filename="voice.ogg"):
-    global current_groq_idx
-    if not groq_keys:
-        raise Exception("No active Groq API keys available for Whisper STT.")
-
-    num_keys = len(groq_keys)
-    for attempt in range(num_keys):
-        idx = (current_groq_idx + attempt) % num_keys
-        key = groq_keys[idx]
-        try:
-            url = "https://api.groq.com/openai/v1/audio/transcriptions"
-            headers = {"Authorization": f"Bearer {key}"}
-            files = {"file": (filename, io.BytesIO(audio_bytes), "audio/ogg")}
-            data = {"model": "whisper-large-v3"}
-            r = requests.post(url, headers=headers, files=files, data=data, timeout=30)
-            if r.status_code == 200:
-                current_groq_idx = idx
-                return r.json().get("text", "").strip()
-            else:
-                print(f"⚠️ Groq Whisper slot {idx+1} error: {r.text}")
-        except Exception as e:
-            print(f"⚠️ Groq Whisper slot {idx+1} failed with error: {e}")
-
-    raise Exception("All Groq API keys failed for voice transcription.")
-
-
-def clean_voice_text(text):
-    if not text:
-        return ""
-    t = str(text).strip()
-
-    # Extract inner quoted string if present (e.g., Voicing your "X"... Here you go: "X")
-    quoted = re.findall(r'["\u201c\u201d\u2018\u2019\'](.*?)["\u201c\u201d\u2018\u2019\']', t)
-    if quoted:
-        for q in reversed(quoted):
-            q_clean = q.strip()
-            if len(q_clean) > 1:
-                t = q_clean
-                break
-
-    # Strip conversational LLM intro prefixes
-    t = re.sub(r"^(?:voicing your|here is your voice note|here's your voice note|sure!|here you go|voicing|voicing:)[^:]*:\s*", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"^(?:voicing your|here is your voice note|here's your voice note|sure!|here you go|voicing|voicing:)\s*", "", t, flags=re.IGNORECASE)
-
-    # Remove markdown symbols & URLs for clean speech
-    t = re.sub(r"[*_`#~>|\-\U00010000-\U0010ffff]", "", t)
-    t = re.sub(r"https?://\S+", "", t).strip()
-    return t
-
-
-def text_to_speech_bytes(text, lang="en"):
-    if not gTTS:
-        return None
-    try:
-        clean_text = clean_voice_text(text)
-        if not clean_text:
-            clean_text = "Here is your response."
-
-        tts = gTTS(text=clean_text[:800], lang=lang)
-        fp = io.BytesIO()
-        tts.write_to_fp(fp)
-        fp.seek(0)
-        return fp.read()
-    except Exception as e:
-        print(f"Error generating text-to-speech: {e}")
-        return None
-
-
-def send_voice_bytes(token, chat_id, voice_bytes, caption="", reply_markup=None):
-    url = f"https://api.telegram.org/bot{token}/sendVoice"
-    files = {"voice": ("voice.ogg", io.BytesIO(voice_bytes), "audio/ogg")}
-    data = {"chat_id": chat_id}
-    if caption:
-        data["caption"] = markdown_to_html(caption)
-        data["parse_mode"] = "HTML"
-    if reply_markup:
-        data["reply_markup"] = json.dumps(reply_markup)
-    try:
-        r = requests.post(url, data=data, files=files, timeout=35)
-        if r.status_code == 200:
-            return r.json().get("result", {})
-        else:
-            print(f"Error sending voice note: {r.text}")
-            return None
-    except Exception as e:
-        print(f"Error sending voice note: {e}")
-        return None
 
 
 LAST_COMMIT_FILE = "last_commit.txt"
@@ -2615,82 +2518,6 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         )
                         continue
 
-                    # -------- VOICE / AUDIO MESSAGE --------
-                    if "voice" in message or "audio" in message:
-                        plan = user_record.get("plan", "free")
-                        is_admin = (sender_str == str(admin_id))
-                        is_unltd = user_record.get("unlimited", False) or is_admin
-
-                        if not is_unltd and plan == "free":
-                            send_message(
-                                token, chat_id,
-                                "🌟 *Voice Note AI is a Premium Feature!*\n\n"
-                                "Voice Note processing is available exclusively for **Premium** members.\n\n"
-                                "🚀 Type `/upgrade` to upgrade your plan and unlock Voice AI!"
-                            )
-                            continue
-
-                        voice_obj = message.get("voice") or message.get("audio")
-                        file_id = voice_obj["file_id"]
-
-                        send_typing(token, chat_id)
-                        send_message(token, chat_id, "🎧 *Listening to voice note...*")
-
-                        try:
-                            # 1. getFile & download audio
-                            file_info = requests.get(
-                                f"https://api.telegram.org/bot{token}/getFile",
-                                params={"file_id": file_id},
-                                timeout=10
-                            ).json()
-                            file_path = file_info.get("result", {}).get("file_path")
-
-                            if file_path:
-                                download_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
-                                audio_bytes = requests.get(download_url, timeout=25).content
-
-                                # 2. Transcribe voice using Groq Whisper STT
-                                transcribed_text = transcribe_audio_groq(groq_keys, audio_bytes, filename="voice.ogg")
-
-                                if not transcribed_text:
-                                    send_message(token, chat_id, "⚠️ Could not hear any speech in the voice note. Please try again!")
-                                    continue
-
-                                # 3. Format message for AI history
-                                if session_key not in user_histories:
-                                    saved_hist = user_record.get("history", [])
-                                    user_histories[session_key] = saved_hist if saved_hist else [
-                                        {"role": "system", "content": build_system_prompt(user_record.get("preferences", {}))}
-                                    ]
-
-                                user_histories[session_key].append({"role": "user", "content": f"[Voice Message Transcribed]: {transcribed_text}"})
-
-                                # 4. Generate AI response
-                                if active_mode == "groq":
-                                    ai_reply = ask_groq_with_failover(groq_keys, user_histories[session_key])
-                                else:
-                                    ai_reply = ask_medusa_with_failover(cyberneurova_keys, user_histories[session_key])
-
-                                user_histories[session_key].append({"role": "assistant", "content": ai_reply})
-                                user_record["history"] = user_histories[session_key]
-                                save_single_user(sender_str, user_record)
-
-                                # 5. Convert response to Voice Note & Reply
-                                clean_reply = clean_voice_text(ai_reply)
-                                caption_text = f"🎙️ *Speech Recognized:* _{transcribed_text}_\n\n🐍 *Medusa:* {clean_reply}"
-                                voice_bytes = text_to_speech_bytes(clean_reply, lang="en")
-
-                                if voice_bytes:
-                                    send_voice_bytes(token, chat_id, voice_bytes, caption=caption_text)
-                                else:
-                                    send_message(token, chat_id, caption_text)
-                            else:
-                                send_message(token, chat_id, "⚠️ Failed to fetch audio file from Telegram.")
-                        except Exception as e:
-                            print(f"Error handling voice message: {e}")
-                            send_message(token, chat_id, f"💥 *Error processing voice message:* {e}")
-                        continue
-
                     # -------- PHOTO MESSAGE --------
                     if "photo" in message:
                         photo = message["photo"]
@@ -3008,29 +2835,6 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         send_start_greeting(token, chat_id, sender_id, first_name, username, admin_id)
                         continue
 
-                    # -------- VOICE RESPONSE TOGGLE (/voice) --------
-                    if cmd == "voice":
-                        plan = user_record.get("plan", "free")
-                        is_admin = (sender_str == str(admin_id))
-                        is_unltd = user_record.get("unlimited", False) or is_admin
-
-                        if not is_unltd and plan == "free":
-                            send_message(
-                                token, chat_id,
-                                "🌟 *Voice Note AI is a Premium Feature!*\n\n"
-                                "Voice Notes and Voice Response Mode are available exclusively for **Premium** members.\n\n"
-                                "🚀 Type `/upgrade` to upgrade your plan and unlock Voice AI!"
-                            )
-                            continue
-
-                        current_vmode = user_record.get("voice_mode", False)
-                        user_record["voice_mode"] = not current_vmode
-                        save_single_user(sender_str, user_record)
-
-                        status_str = "ENABLED 🟢 (Medusa will reply with Voice Notes)" if user_record["voice_mode"] else "DISABLED 🔴 (Standard text replies)"
-                        send_message(token, chat_id, f"🎙️ *Voice Note AI Mode:* {status_str}")
-                        continue
-
                     # -------- ADMIN BROADCAST (/broadcast) --------
                     if cmd == "broadcast":
                         is_sub = (user_record.get("role") == "subadmin")
@@ -3194,23 +2998,28 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
 
                     # -------- MODE COMMANDS --------
                     if cmd == "medusa":
-                        user_record["active_mode"] = "medusa"
-                        if "last_reset" not in user_record:
-                            user_record["last_reset"] = time.time()
-                        user_data[sender_str] = user_record
-                        save_single_user(sender_str, user_record)
-                        
-                        if session_key in user_histories:
-                            user_histories[session_key].clear()
-                            
-                        send_message(
-                            token,
-                            chat_id,
-                            "🌟 *Mode switched to Premium Mode!*\n\n"
-                            "You are now talking in Premium Mode. "
-                            "You have a limit of *4 questions per day* in this mode.\n\n"
-                            "Use `/check` to view your credits, and `/default` to switch back to free unlimited mode."
+                        maint_msg = (
+                            "I am sorry, I can't fulfill your request. Our models are currently in maintenance due to being overloaded, so I had to stop access.\n\n"
+                            "Maybe I will never be back, but if I come back, I will notify you."
                         )
+                        keys = load_keys()
+                        medusa_img_raw = os.environ.get("MEDUSA_IMAGE") or keys.get("MEDUSA_IMAGE", "")
+                        medusa_img = None
+                        if medusa_img_raw:
+                            medusa_imgs = [u.strip() for u in medusa_img_raw.split(",") if u.strip()]
+                            if medusa_imgs:
+                                medusa_img = random.choice(medusa_imgs)
+
+                        if not medusa_img:
+                            images = get_start_images()
+                            medusa_img = random.choice(images) if images else None
+
+                        if medusa_img:
+                            res = send_photo_url(token, chat_id, medusa_img, maint_msg)
+                            if not res:
+                                send_message(token, chat_id, maint_msg)
+                        else:
+                            send_message(token, chat_id, maint_msg)
                         continue
 
                     if cmd == "default":
@@ -3616,15 +3425,7 @@ def telegram_mode(cyberneurova_keys, groq_keys, gemini_keys, token, admin_id):
                         user_data[sender_str] = user_record
                         save_user_data(user_data)
 
-                        if user_record.get("voice_mode", False):
-                            clean_rep = clean_voice_text(reply)
-                            voice_bytes = text_to_speech_bytes(clean_rep, lang="en")
-                            if voice_bytes:
-                                send_voice_bytes(token, chat_id, voice_bytes, caption=clean_rep)
-                            else:
-                                send_message(token, chat_id, reply)
-                        else:
-                            send_message(token, chat_id, reply)
+                        send_message(token, chat_id, reply)
                             
                     except Exception as e:
                         print(f"Error querying LLM API: {e}")
